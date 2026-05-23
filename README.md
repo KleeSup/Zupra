@@ -2,10 +2,11 @@
 
 The game framework for Zig enthusiasts.
 
-## Dependencies
-- bgfx
-- sdl3
-- zmath
+## Dependencies#
+- Zig (v0.16.0)
+- [bgfx](https://github.com/cyberegoorg/zbgfx)
+- [sdl3]()
+- [zmath](https://github.com/zig-gamedev/zmath)
 
 ## Structure
 
