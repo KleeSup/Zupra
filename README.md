@@ -9,7 +9,7 @@ The game framework for Zig enthusiasts.
 
 ## Structure
 
-´´´
+```
 Zupra/
 ├── build.zig
 ├── build.zig.zon
@@ -133,4 +133,4 @@ Zupra/
     ├── hello_3d/
     ├── pbr_scene/
     └── deferred_demo/
-´´´
+```
