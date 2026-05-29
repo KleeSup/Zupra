@@ -25,24 +25,28 @@
     .fingerprint = 0x9b2d5233e0301f04, // Changing this has security and trust implications.
     // Tracks the earliest Zig version that the package considers to be a
     // supported use case.
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.16.0-dev.3142+5ccfeb926",
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
     // `zig build --fetch` can be used to fetch all dependencies of a package, recursively.
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
-        .zbgfx = .{
-            .url = "git+https://github.com/cyberegoorg/zbgfx.git#8f01ea0ab69f9b1105f5f7d8d97d6e6e19fb5ca6",
-            .hash = "zbgfx-0.12.0-Sm4IxEuHywb45XqoIhv3iEOxKXc01aKNNVjI63FHvqFw",
-        },
         .zmath = .{
             .url = "git+https://github.com/zig-gamedev/zmath.git#9e42b04a24c970a297b365f3d3022f92dbf3219d",
             .hash = "zmath-0.11.0-dev-wjwivTwtAwDOjG2_KGP-HLtHrONfsFfHttalmxFAGVAK",
         },
-        .zsdl = .{
-            .url = "git+https://github.com/zig-gamedev/zsdl.git#fa05b59b5e133141680077534e6c86d8c98f8dec",
-            .hash = "zsdl-0.4.0-dev-rFpjE6PoXwBMQ7CuE5QFp4l7iRuNc6e6YZNAMyOtbWOa",
+        .sokol = .{
+            .url = "git+https://github.com/floooh/sokol-zig.git#dcd9e6222aea7a0593a878cd4e52568550c3990f",
+            .hash = "sokol-0.1.0-pb1HKxFoNwDMWI3RMfmL3FQbTNzOArvp-8BGoBj8QOH1",
+        },
+        .zstbi = .{
+            .url = "git+https://github.com/zig-gamedev/zstbi.git#3813f5f113b26f644cfa01a30155cc76b3526e91",
+            .hash = "zstbi-0.11.0-dev-L0Ea_3GWBwAh7m54XX055vwLKPTPij5hyqyeq92MXPE2",
+        },
+        .zmesh = .{
+            .url = "git+https://github.com/zig-gamedev/zmesh.git#a0efcc452eab17550ad5525df2293009e9cbaf66",
+            .hash = "zmesh-0.11.0-dev-oO3A5kqTCgAF9nWzOGHywV6-07-wJRUIMm1RH7BlCTHb",
         },
     },
     .paths = .{
