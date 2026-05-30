@@ -23,6 +23,20 @@ pub const colors = struct {
     pub const MAGENTA = Color{ .r = 1.0, .g = 0, .b = 1.0, .a = 1.0 };
     pub const SKYBLUE = Color{ .r = 0.529, .g = 0.808, .b = 0.922, .a = 1.0 };
     pub const GRAY = Color{ .r = 0.5, .g = 0.5, .b = 0.5, .a = 1.0 };
+
+    /// Pack a normalized RGBA color into a UBYTE4N u32.
+    /// `r` is the least-significant byte.
+    pub fn packColorF(r: f32, g: f32, b: f32, a: f32) u32 {
+        const R: u32 = @intFromFloat(std.math.clamp(r, 0, 1) * 255.0 + 0.5);
+        const G: u32 = @intFromFloat(std.math.clamp(g, 0, 1) * 255.0 + 0.5);
+        const B: u32 = @intFromFloat(std.math.clamp(b, 0, 1) * 255.0 + 0.5);
+        const A: u32 = @intFromFloat(std.math.clamp(a, 0, 1) * 255.0 + 0.5);
+        return R | (G << 8) | (B << 16) | (A << 24);
+    }
+
+    pub inline fn packColor(color: Color) u32 {
+        return packColorF(color.r, color.g, color.b, color.a);
+    }
 };
 
 // --- Drawing ---
@@ -84,6 +98,7 @@ pub fn exit() void {
 }
 
 // --- Init ---
+
 pub const PoolSetup = struct {
     buffer_pool_size: i32 = 0,
     image_pool_size: i32 = 0,
@@ -110,6 +125,7 @@ pub const Config = struct {
     deinitFn: ?*const fn () void = null,
 };
 var user_config: Config = undefined;
+var intern_deinit: *const fn () void = undefined;
 
 pub fn init(ctx: std.process.Init, config: Config) void {
     user_config = config;
@@ -146,6 +162,7 @@ export fn _init() void {
         .uniform_buffer_size = user_config.pools.uniform_buffer_size,
     });
     sokol.time.setup();
+    intern_deinit = intern.init();
     user_config.initFn();
 }
 export fn _deinit() void {
@@ -154,6 +171,8 @@ export fn _deinit() void {
     }
     zstbi.deinit();
     zmesh.deinit();
+    intern_deinit();
+    sokol.gfx.shutdown();
 }
 
 export fn _render() void {
