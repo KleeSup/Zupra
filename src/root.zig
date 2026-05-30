@@ -1,6 +1,8 @@
 pub const math = @import("math.zig");
 pub const intern = @import("intern.zig");
 pub const log = @import("util/log.zig");
+pub const render = @import("render/render.zig");
+pub const graphics = @import("graphics/graphics.zig");
 
 const sokol = @import("sokol");
 const std = @import("std");
@@ -31,18 +33,27 @@ pub fn isDrawingToFrameBuffer() bool {
     return fb_drawing;
 }
 
+/// Begin a drawing pass with the given pass descriptor.
+/// This is a low-level function that allows you to specify custom pass descriptors,
+/// but you can also use the more convenient beginDrawingClear() and beginDrawing() functions for common use cases.
 pub fn beginDrawingPass(pass: sokol.gfx.Pass) void {
     if (drawing) @panic("endDrawing() needs to be called before beginDrawing()!");
     drawing = true;
     sokol.gfx.beginPass(pass);
 }
+
+/// Begin a drawing pass with the given clear color. This will automatically clear the screen with the specified color at the beginning of the pass.
 pub fn beginDrawingClear(clear_color: Color) void {
     beginDrawingPass(.{ .action = buildClearAction(clear_color), .swapchain = sokol.glue.swapchain() });
 }
+
+/// Begin a drawing pass without clearing the screen.
+/// This is useful for drawing on top of existing content, but make sure to call endDrawing() when you're done.
 pub fn beginDrawing() void {
     beginDrawingPass(.{ .swapchain = sokol.glue.swapchain() });
 }
 
+/// End the current drawing pass. This will submit all drawing commands to the GPU and present the frame if you're drawing to the swapchain.
 pub fn endDrawing() void {
     if (!drawing) @panic("beginDrawing() needs to be called before endDrawing()!");
     drawing = false;
@@ -50,6 +61,8 @@ pub fn endDrawing() void {
     sokol.gfx.endPass();
 }
 
+/// Builds a pass action that clears the screen with the specified color.
+/// This is a helper function that can be used with beginDrawingPass() to easily clear the screen at the beginning of a drawing pass.
 pub fn buildClearAction(clear_color: Color) sokol.gfx.PassAction {
     var frame_action = sokol.gfx.PassAction{};
     frame_action.colors[0] = .{ .load_action = .CLEAR, .clear_value = clear_color };
@@ -59,10 +72,13 @@ pub fn buildClearAction(clear_color: Color) sokol.gfx.PassAction {
 
 // --- Management ---
 
+/// Request the application to quit. This will trigger the deinit callback and then exit the application.
 pub fn quit() void {
     sokol.app.requestQuit();
 }
 
+/// Immediately exit the application without triggering the deinit callback.
+/// Use with caution, as this will not clean up any resources!
 pub fn exit() void {
     sokol.app.quit();
 }
@@ -86,6 +102,7 @@ pub const Config = struct {
     v_sync: bool = false,
     sample_count: u8 = 4, //4 for MSAAx4
     pools: PoolSetup = .{},
+    index_type: graphics.IndexType = .u32,
 
     initFn: *const fn () void,
     renderFn: *const fn () void,
