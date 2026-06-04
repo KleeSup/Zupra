@@ -36,6 +36,12 @@ pub fn build(b: *Build) !void {
             .{ .name = "zstbi", .module = zstbi.module("root") },
             .{ .name = "zmesh", .module = zmesh.module("root") },
             .{ .name = "zmath", .module = zmath.module("root") },
+            .{ .name = "shaders", .module = b.createModule(.{
+                .root_source_file = b.path("shaders/shaders.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "sokol", .module = dep_sokol.module("sokol") }},
+            }) },
         },
     });
 

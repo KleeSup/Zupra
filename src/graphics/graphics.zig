@@ -1,6 +1,7 @@
 const std = @import("std");
 
 pub const pipeline = @import("pipeline.zig");
+pub const texture = @import("texture.zig");
 
 // --- Vertex types with canonical layouts ---
 // Attribute SLOT order is a contract: slot 0 = first field, slot 1 = second,

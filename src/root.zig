@@ -3,6 +3,7 @@ pub const intern = @import("intern.zig");
 pub const log = @import("util/log.zig");
 pub const render = @import("render/render.zig");
 pub const graphics = @import("graphics/graphics.zig");
+pub const app = @import("app.zig");
 
 const sokol = @import("sokol");
 const std = @import("std");
@@ -12,7 +13,7 @@ const zmesh = @import("zmesh");
 // --- Color ---
 
 pub const Color = sokol.gfx.Color;
-pub const colors = struct {
+pub const colors = opaque {
     pub const BLACK = Color{ .r = 0, .g = 0, .b = 0, .a = 1.0 };
     pub const WHITE = Color{ .r = 1.0, .g = 1.0, .b = 1.0, .a = 1.0 };
     pub const RED = Color{ .r = 1.0, .g = 0, .b = 0, .a = 1.0 };
@@ -84,19 +85,6 @@ pub fn buildClearAction(clear_color: Color) sokol.gfx.PassAction {
     return frame_action;
 }
 
-// --- Management ---
-
-/// Request the application to quit. This will trigger the deinit callback and then exit the application.
-pub fn quit() void {
-    sokol.app.requestQuit();
-}
-
-/// Immediately exit the application without triggering the deinit callback.
-/// Use with caution, as this will not clean up any resources!
-pub fn exit() void {
-    sokol.app.quit();
-}
-
 // --- Init ---
 
 pub const PoolSetup = struct {
@@ -115,7 +103,7 @@ pub const Config = struct {
     height: u32 = 720,
     fullscreen: bool = false,
     v_sync: bool = false,
-    sample_count: u8 = 4, //4 for MSAAx4
+    sample_count: u8 = 1, //4 for MSAAx4
     pools: PoolSetup = .{},
     index_type: graphics.IndexType = .u32,
 
