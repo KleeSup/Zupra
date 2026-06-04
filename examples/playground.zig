@@ -30,7 +30,10 @@ pub fn render() void {
     zupra.beginDrawingClear(zupra.colors.SKYBLUE);
     batch.begin(cam, .alpha);
 
-    batch.draw(zupra.graphics.texture.Sprite.init(.full(icon)));
+    var reg = zupra.graphics.texture.Sprite.init(.full(icon));
+    reg.dest.width *= 0.5;
+    reg.dest.height *= 0.5;
+    batch.draw(reg);
 
     batch.end();
     zupra.endDrawing();

@@ -165,6 +165,7 @@ export fn _deinit() void {
 
 export fn _render() void {
     user_config.renderFn();
+    sokol.gfx.commit();
 }
 export fn _event(event: [*c]const sokol.app.Event) callconv(.c) void {
     if (user_config.eventFn) |eventFn| {
