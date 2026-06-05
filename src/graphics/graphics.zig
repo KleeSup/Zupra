@@ -1,7 +1,11 @@
 const std = @import("std");
+const shader = @import("shader.zig");
 
 pub const pipeline = @import("pipeline.zig");
 pub const texture = @import("texture.zig");
+pub const ShaderProgram = shader.ShaderProgram;
+pub const ShaderOptions = shader.Options;
+pub const ShaderSlots = shader.Slots;
 
 // --- Vertex types with canonical layouts ---
 // Attribute SLOT order is a contract: slot 0 = first field, slot 1 = second,

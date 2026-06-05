@@ -53,6 +53,7 @@ pub fn build(b: *Build) !void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "zupra", .module = root_mod },
+            .{ .name = "sokol", .module = dep_sokol.module("sokol") }, // make sokol available for examples/assets/shaders/
         },
     });
 
@@ -135,7 +136,8 @@ pub fn build(b: *Build) !void {
 
     compile_step.root_module.linkLibrary(zmesh.artifact("zmesh"));
 
-    try compileShaders(b, compile_step, dep_sokol);
+    try compileShaders(b, compile_step, dep_sokol, "shaders");
+    try compileShaders(b, compile_step, dep_sokol, "examples/assets/shaders");
     bakeBrdfLut(b, &target, compile_step);
 }
 
@@ -168,10 +170,9 @@ fn buildWeb(b: *Build, lib: *std.Build.Step.Compile, root: *Build.Module, dep_so
     b.step("run", "Run engine").dependOn(&run.step);
 }
 
-fn compileShaders(b: *Build, compile_step: *std.Build.Step.Compile, dep_sokol: *Build.Dependency) !void {
+fn compileShaders(b: *Build, compile_step: *std.Build.Step.Compile, dep_sokol: *Build.Dependency, shader_dir_path: []const u8) !void {
     // Shader compilation
     const dep_shdc = dep_sokol.builder.dependency("shdc", .{});
-    const shader_dir_path = "shaders";
     const io = b.graph.io;
     const cwd = std.Io.Dir.cwd();
     var dir = try cwd.openDir(io, shader_dir_path, .{ .iterate = true });

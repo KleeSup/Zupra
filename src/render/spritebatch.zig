@@ -48,6 +48,7 @@ const Texture = tex.Texture;
 const Sprite = tex.Sprite;
 const Camera2D = cam.Camera2D;
 const Matrix = math.Matrix;
+const ShaderProgram = gfx.ShaderProgram;
 
 // --- generated-symbol aliases (single place to fix if shdc names differ) ---
 const SHADER_DESC = shd.spriteShaderDesc;
@@ -72,7 +73,7 @@ pub const SpriteBatch = struct {
     vbuf: sg.Buffer, // streaming vertices
     ibuf: sg.Buffer, // static quad indices
     sampler: sg.Sampler,
-    shader: sg.Shader,
+    shader: ShaderProgram,
 
     cpu: []Vertex2D, // scratch for the current run
     max_quads: u32,
@@ -83,7 +84,7 @@ pub const SpriteBatch = struct {
     mvp: Matrix = undefined,
     blend: BlendMode = .alpha,
     pass: PassSignature = PassSignature.swapchain,
-    custom_shader: ?sg.Shader = null,
+    custom_shader: ?ShaderProgram = null,
 
     // current run
     quad_count: u32 = 0,
@@ -116,7 +117,11 @@ pub const SpriteBatch = struct {
             .wrap_v = opts.wrap,
         });
 
-        const shader = sg.makeShader(SHADER_DESC(sg.queryBackend()));
+        const shader = ShaderProgram.init(SHADER_DESC, .{ .slots = .{
+            .tex_view = shd.VIEW_tex,
+            .sampler = shd.SMP_smp,
+            .vs_params = shd.UB_vs_params,
+        } });
 
         return .{
             .cache = cache,
@@ -131,7 +136,7 @@ pub const SpriteBatch = struct {
     }
 
     pub fn deinit(self: *SpriteBatch, allocator: std.mem.Allocator) void {
-        sg.destroyShader(self.shader);
+        self.shader.deinit();
         sg.destroySampler(self.sampler);
         sg.destroyBuffer(self.ibuf);
         sg.destroyBuffer(self.vbuf);
@@ -149,7 +154,7 @@ pub const SpriteBatch = struct {
         camera: Camera2D,
         blend: BlendMode,
         pass: PassSignature,
-        custom_shader: ?sg.Shader,
+        custom_shader: ?ShaderProgram,
     ) void {
         std.debug.assert(!self.active);
         self.active = true;
@@ -195,9 +200,11 @@ pub const SpriteBatch = struct {
         const vcount = self.quad_count * 4;
         const offset = sg.appendBuffer(self.vbuf, sg.asRange(self.cpu[0..vcount]));
 
+        const prog = self.custom_shader orelse self.shader;
+
         const key = PipelineKey{
-            .shader = self.custom_shader orelse self.shader,
-            .layout = VertexLayout.sprite,
+            .shader = prog.handle,
+            .layout = prog.layout,
             .index_type = self.index_type,
             .pass = self.pass,
             .cull = .NONE,
@@ -215,14 +222,14 @@ pub const SpriteBatch = struct {
         bindings.vertex_buffers[0] = self.vbuf;
         bindings.vertex_buffer_offsets[0] = offset;
         bindings.index_buffer = self.ibuf;
-        bindings.views[SLOT_TEX_VIEW] = self.cur_view;
-        bindings.samplers[SLOT_SAMPLER] = self.sampler;
+        bindings.views[prog.slots.tex_view] = self.cur_view;
+        bindings.samplers[prog.slots.sampler] = self.sampler;
 
         var vs_params = VsParams{ .mvp = @bitCast(self.mvp) };
 
         sg.applyPipeline(pip);
         sg.applyBindings(bindings);
-        sg.applyUniforms(UB_VS_PARAMS, sg.asRange(&vs_params));
+        sg.applyUniforms(prog.slots.vs_params, sg.asRange(&vs_params));
         sg.draw(0, self.quad_count * 6, 1);
 
         self.quad_count = 0;

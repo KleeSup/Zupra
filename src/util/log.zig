@@ -15,3 +15,8 @@ pub fn warn(comptime msg: []const u8, args: anytype) void {
 pub fn err(comptime msg: []const u8, args: anytype) void {
     log.err(msg, args);
 }
+
+pub fn panic(comptime msg: []const u8, args: anytype) void {
+    err(msg, args);
+    @panic("Zupra terminated: panic");
+}
