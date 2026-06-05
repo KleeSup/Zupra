@@ -65,6 +65,7 @@ pub const SpriteBatchOptions = struct {
     /// Texture filtering for the shared sampler.
     filter: sg.Filter = .LINEAR,
     wrap: sg.Wrap = .CLAMP_TO_EDGE,
+    fs_uniform_capacity: usize = 256,
 };
 
 pub const SpriteBatch = struct {
@@ -78,6 +79,8 @@ pub const SpriteBatch = struct {
     cpu: []Vertex2D, // scratch for the current run
     max_quads: u32,
     index_type: IndexType,
+    fs_scratch: []u8,
+    fs_len: usize = 0,
 
     // begin()..end() state
     active: bool = false,
@@ -123,6 +126,9 @@ pub const SpriteBatch = struct {
             .vs_params = shd.UB_vs_params,
         } });
 
+        const fs_scratch = try allocator.alloc(u8, opts.fs_uniform_capacity);
+        errdefer allocator.free(fs_scratch);
+
         return .{
             .cache = cache,
             .vbuf = vbuf,
@@ -132,6 +138,7 @@ pub const SpriteBatch = struct {
             .cpu = cpu,
             .max_quads = opts.max_quads,
             .index_type = opts.index_type,
+            .fs_scratch = fs_scratch,
         };
     }
 
@@ -141,12 +148,13 @@ pub const SpriteBatch = struct {
         sg.destroyBuffer(self.ibuf);
         sg.destroyBuffer(self.vbuf);
         allocator.free(self.cpu);
+        allocator.free(self.fs_scratch);
     }
 
     /// Begin a batch. `blend` and any `shader` override apply to the whole span.
     /// `pass` defaults to the swapchain; pass an offscreen signature for FBO/MRT.
     pub fn begin(self: *SpriteBatch, camera: Camera2D, blend: BlendMode) void {
-        self.beginEx(camera, blend, PassSignature.swapchain, null);
+        self.beginEx(camera, blend, PassSignature.swapchain, null, null);
     }
 
     pub fn beginEx(
@@ -155,6 +163,7 @@ pub const SpriteBatch = struct {
         blend: BlendMode,
         pass: PassSignature,
         custom_shader: ?ShaderProgram,
+        fs_uniforms: ?[]const u8,
     ) void {
         std.debug.assert(!self.active);
         self.active = true;
@@ -164,6 +173,14 @@ pub const SpriteBatch = struct {
         self.custom_shader = custom_shader;
         self.quad_count = 0;
         self.cur_view_valid = false;
+
+        // Copy so the caller's source (often a stack local) can die after begin().
+        self.fs_len = 0;
+        if (fs_uniforms) |bytes| {
+            std.debug.assert(bytes.len <= self.fs_scratch.len); // else raise fs_uniform_capacity
+            @memcpy(self.fs_scratch[0..bytes.len], bytes);
+            self.fs_len = bytes.len;
+        }
     }
 
     pub fn draw(self: *SpriteBatch, sprite: Sprite) void {
@@ -230,6 +247,11 @@ pub const SpriteBatch = struct {
         sg.applyPipeline(pip);
         sg.applyBindings(bindings);
         sg.applyUniforms(prog.slots.vs_params, sg.asRange(&vs_params));
+        if (self.fs_len > 0) {
+            if (prog.slots.fs_params) |slot| {
+                sg.applyUniforms(slot, sg.asRange(self.fs_scratch[0..self.fs_len]));
+            }
+        }
         sg.draw(0, self.quad_count * 6, 1);
 
         self.quad_count = 0;

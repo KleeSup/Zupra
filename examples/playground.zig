@@ -22,6 +22,7 @@ var batch: zupra.render.SpriteBatch = undefined;
 var cam: zupra.render.Camera2D = undefined;
 var icon: zupra.graphics.texture.Texture = undefined;
 var fancy: zupra.graphics.ShaderProgram = undefined;
+const shader_file = @import("assets/shaders/sprite_fancy.glsl.zig");
 
 var last_ticks: u64 = 0;
 var t: f32 = 0;
@@ -43,7 +44,7 @@ pub fn init() void {
     icon = zupra.graphics.texture.Texture.initBuffer(img_data) catch unreachable;
 
     // Compile-time-generated desc for shaders/sprite_fancy.glsl.
-    fancy = zupra.graphics.ShaderProgram.init(@import("assets/shaders/sprite_fancy.glsl.zig").spriteFancyShaderDesc, .{});
+    fancy = zupra.graphics.ShaderProgram.init(shader_file.spriteFancyShaderDesc, .{ .slots = .{ .fs_params = shader_file.UB_fs_params } });
 
     last_ticks = sokol.time.now();
 }
@@ -73,7 +74,10 @@ pub fn render() void {
 
     // The whole point: hand the batch our custom shader. PassSignature defaults
     // to the swapchain (.{}). Everything else is the normal batcher path.
-    batch.beginEx(cam, .alpha, .{}, fancy);
+
+    var p = shader_file.FsParams{ .time = t };
+
+    batch.beginEx(cam, .alpha, .{}, fancy, std.mem.asBytes(&p));
     batch.draw(sprite);
     batch.end();
 

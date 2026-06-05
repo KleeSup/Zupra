@@ -37,6 +37,7 @@ void main() {
 @fs fs
 layout(binding=0) uniform texture2D tex;
 layout(binding=0) uniform sampler smp;
+layout(binding=1) uniform fs_params { float time; };
 
 in vec2 v_uv;
 in vec4 v_color;
@@ -54,6 +55,7 @@ void main() {
     // Hue from the angle around the sprite center -> a full rainbow wheel.
     vec2 c = v_uv - vec2(0.5);
     float hue = atan(c.y, c.x) / 6.2831853 + 0.5;
+    hue *= time;
     vec3 rainbow = hsv2rgb(vec3(hue, 0.9, 1.0));
 
     // Keep the texture's shape (alpha mask) and shading (luminance).
