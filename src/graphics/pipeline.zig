@@ -125,6 +125,9 @@ pub const PipelineKey = struct {
     blend: BlendMode = .none,
     depth_test: bool = false,
     depth_write: bool = false,
+    /// false = non-indexed draw (sokol index_type = .NONE). Debug lines/fills
+    /// and fullscreen post-fx triangles use this; indexed meshes/sprites = true.
+    indexed: bool = true,
 };
 
 /// Maps the framework index tag to sokol's enum.
@@ -139,7 +142,7 @@ fn buildDesc(key: PipelineKey) sg.PipelineDesc {
     var desc = sg.PipelineDesc{
         .shader = key.shader,
         .layout = key.layout.state(),
-        .index_type = toSokolIndexType(key.index_type),
+        .index_type = if (key.indexed) toSokolIndexType(key.index_type) else .NONE,
         .primitive_type = key.primitive,
         .cull_mode = key.cull,
         .sample_count = @intCast(key.pass.sample_count),
