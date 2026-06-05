@@ -10,3 +10,23 @@ pub fn quit() void {
 pub fn exit() void {
     sapp.quit();
 }
+
+pub fn width() i32 {
+    return sapp.width();
+}
+
+pub fn height() i32 {
+    return sapp.height();
+}
+
+pub fn widthf() f32 {
+    return sapp.widthf();
+}
+
+pub fn heightf() f32 {
+    return sapp.heightf();
+}
+
+pub fn getDelta() f32 {
+    return @as(f32, @floatCast(sapp.frameDuration()));
+}

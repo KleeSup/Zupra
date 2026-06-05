@@ -1,7 +1,7 @@
 const std = @import("std");
 const zupra = @import("zupra");
 
-const img_data = @embedFile("assets/icon.png");
+const img_data = @embedFile("assets/zig-programming-language-icon.png");
 var icon: zupra.graphics.texture.Texture = undefined;
 
 var gpa: std.mem.Allocator = undefined;
@@ -22,7 +22,7 @@ pub fn init() void {
     zupra.log.info("Hello from Zupra!", .{});
     cache = .init(gpa);
     batch = zupra.render.SpriteBatch.init(gpa, &cache, .{}) catch unreachable;
-    cam = .init(1280, 720);
+    cam = .init(zupra.app.widthf(), zupra.app.heightf());
     icon = zupra.graphics.texture.Texture.initBuffer(img_data) catch unreachable;
 }
 
@@ -31,8 +31,8 @@ pub fn render() void {
     batch.begin(cam, .alpha);
 
     var reg = zupra.graphics.texture.Sprite.init(.full(icon));
-    reg.dest.width *= 0.5;
-    reg.dest.height *= 0.5;
+    reg.dest.width = zupra.app.widthf();
+    reg.dest.height = zupra.app.heightf();
     batch.draw(reg);
 
     batch.end();

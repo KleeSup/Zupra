@@ -5,6 +5,8 @@ pub const render = @import("render/render.zig");
 pub const graphics = @import("graphics/graphics.zig");
 pub const app = @import("app.zig");
 
+pub const Event = sokol.app.Event;
+
 const sokol = @import("sokol");
 const std = @import("std");
 const zstbi = @import("zstbi");

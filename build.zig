@@ -58,6 +58,7 @@ pub fn build(b: *Build) !void {
 
     const root_source = if (optimize == .Debug) example_mod else root_mod;
 
+    // build for wasm (emscripten)
     if (target.result.cpu.arch.isWasm()) {
         compile_step = b.addLibrary(.{
             .name = "Zupra",
@@ -65,7 +66,7 @@ pub fn build(b: *Build) !void {
             .root_module = root_source,
         });
         try buildWeb(b, compile_step, root_mod, dep_sokol);
-    } else if (target.result.abi.isAndroid()) {
+    } else if (target.result.abi.isAndroid()) { // build for android
         compile_step = b.addLibrary(.{
             .name = "Zupra",
             .linkage = .dynamic,
@@ -84,14 +85,14 @@ pub fn build(b: *Build) !void {
         zstbi.module("root").addSystemIncludePath(.{ .cwd_relative = ndk_include });
 
         b.installArtifact(compile_step);
-    } else if (target.result.os.tag == .ios) {
+    } else if (target.result.os.tag == .ios) { // build for ios
         compile_step = b.addLibrary(.{
             .name = "Zupra",
             .linkage = .static,
             .root_module = root_source,
         });
         b.installArtifact(compile_step);
-    } else {
+    } else { // build native (desktop)
         if (optimize == .Debug) {
             compile_step = b.addExecutable(.{
                 .name = "Zupra",
@@ -111,12 +112,14 @@ pub fn build(b: *Build) !void {
         }
     }
 
+    // add c-libs
     root_mod.addCSourceFile(.{
         .file = b.path("libs/stb_truetype/ctbtt_impl.c"),
         .flags = &.{},
     });
     root_mod.addIncludePath(b.path("libs/stb_truetype"));
 
+    // add dependencies to include path
     if (target.result.cpu.arch.isWasm()) {
         const emsdk = dep_sokol.builder.dependency("emsdk", .{});
         const sysroot_include = emsdk.path("upstream/emscripten/cache/sysroot/include");

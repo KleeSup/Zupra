@@ -22,7 +22,7 @@ pub const Camera2D = struct {
     /// World point that maps onto `offset`.
     target: Vec2 = .{ .x = 0, .y = 0 },
     /// Screen-pixel point that `target` maps to. Set to half the viewport to
-    /// center the target on screen; leave at (0,0) for world==screen pixels.
+    /// center the target on screen. Leave it at (0,0) for world==screen pixels.
     offset: Vec2 = .{ .x = 0, .y = 0 },
     rotation: f32 = 0, // radians
     zoom: f32 = 1.0,
@@ -39,6 +39,12 @@ pub const Camera2D = struct {
     pub fn setViewport(self: *Camera2D, w: f32, h: f32) void {
         self.viewport_width = w;
         self.viewport_height = h;
+    }
+
+    /// Moves the camera by the given `move` vector.
+    pub fn translate(self: *Camera2D, move: Vec2) void {
+        self.target.x += move.x;
+        self.target.y += move.y;
     }
 
     /// Pixel space -> clip space. top=0, bottom=height gives the y-down flip.
