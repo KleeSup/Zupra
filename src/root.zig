@@ -4,6 +4,7 @@ pub const log = @import("util/log.zig");
 pub const render = @import("render/render.zig");
 pub const graphics = @import("graphics/graphics.zig");
 pub const app = @import("app.zig");
+pub const input = @import("input/input.zig");
 
 pub const Event = sokol.app.Event;
 
@@ -170,6 +171,7 @@ export fn _render() void {
     sokol.gfx.commit();
 }
 export fn _event(event: [*c]const sokol.app.Event) callconv(.c) void {
+    input.update(event);
     if (user_config.eventFn) |eventFn| {
         eventFn(event);
     }

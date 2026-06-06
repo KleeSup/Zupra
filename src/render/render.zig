@@ -4,3 +4,6 @@ pub const SpriteBatchOptions = @import("spritebatch.zig").SpriteBatchOptions;
 pub const anim = @import("animation.zig");
 pub const DebugBatch = @import("debugbatch.zig").DebugBatch;
 pub const DebugBatchOptions = @import("debugbatch.zig").DebugBatchOptions;
+pub const Font = @import("font.zig").Font;
+pub const FontOptions = @import("font.zig").FontOptions;
+pub const TextBatch2D = @import("font.zig").TextBatch2D;

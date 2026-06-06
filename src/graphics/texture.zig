@@ -69,6 +69,18 @@ pub const Texture = struct {
         return Texture.init(img, width, height, .RGBA8);
     }
 
+    /// CPU-updated single-channel texture (e.g. an SDF font atlas). 1 byte/pixel.
+    pub fn initDynamicFormat(width: u32, height: u32, format: sg.PixelFormat) Texture {
+        const desc = sg.ImageDesc{
+            .width = @intCast(width),
+            .height = @intCast(height),
+            .pixel_format = format,
+            .usage = .{ .dynamic_update = true },
+        };
+        const img = sg.makeImage(desc);
+        return Texture.init(img, width, height, format);
+    }
+
     /// GPU render target that can also be sampled. Single-sampled (MSAA targets
     /// aren't directly sampleable and need a resolve step which is handled separately).
     /// `format` lets a deferred G-buffer pick e.g. RGBA16F / RGBA8 per target.

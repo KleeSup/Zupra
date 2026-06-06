@@ -116,7 +116,7 @@ pub fn build(b: *Build) !void {
     // add c-libs
     root_mod.addCSourceFile(.{
         .file = b.path("libs/stb_truetype/ctbtt_impl.c"),
-        .flags = &.{},
+        .flags = &.{"-fno-sanitize=undefined"},
     });
     root_mod.addIncludePath(b.path("libs/stb_truetype"));
 

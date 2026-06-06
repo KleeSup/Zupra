@@ -23,6 +23,7 @@ var cam: zupra.render.Camera2D = undefined;
 var icon: zupra.graphics.texture.Texture = undefined;
 var fancy: zupra.graphics.ShaderProgram = undefined;
 var dbatch: zupra.render.DebugBatch = undefined;
+var font: zupra.render.Font = undefined;
 const shader_file = @import("assets/shaders/sprite_fancy.glsl.zig");
 
 var last_ticks: u64 = 0;
@@ -34,6 +35,7 @@ pub fn main(ctx: std.process.Init) !void {
         .initFn = init,
         .renderFn = render,
         .deinitFn = deinit,
+        .eventFn = onEvent,
     });
 }
 
@@ -48,9 +50,12 @@ pub fn init() void {
     // Compile-time-generated desc for shaders/sprite_fancy.glsl.
     fancy = zupra.graphics.ShaderProgram.init(shader_file.spriteFancyShaderDesc, .{ .slots = .{ .fs_params = shader_file.UB_fs_params } });
 
+    font = zupra.render.Font.initFromMemory(gpa, @embedFile("assets/OpenSans-Regular.ttf"), .{}) catch unreachable;
+
     last_ticks = sokol.time.now();
 }
 
+var textScale: f32 = 2;
 pub fn render() void {
     // Frame-rate independent time (vsync is off by default in Config).
     const now = sokol.time.now();
@@ -75,8 +80,13 @@ pub fn render() void {
     zupra.beginDrawingClear(zupra.colors.BLACK);
 
     dbatch.begin(cam);
-    dbatch.drawLine(.{ .x = 100, .y = 100 }, .{ .x = 200, .y = 300 }, zupra.colors.YELLOW);
+    dbatch.drawLine(.{ .x = 100, .y = 100 }, .{ .x = zupra.input.mouseX, .y = zupra.input.mouseY }, zupra.colors.YELLOW);
     dbatch.end();
+
+    var textBatch = zupra.render.TextBatch2D.init(&font, &batch);
+    textBatch.begin(cam);
+    textBatch.draw("Hello World", 100, 100, textScale, zupra.colors.WHITE);
+    textBatch.end();
 
     // The whole point: hand the batch our custom shader. PassSignature defaults
     // to the swapchain (.{}). Everything else is the normal batcher path.
@@ -96,4 +106,14 @@ pub fn deinit() void {
     batch.deinit(gpa);
     dbatch.deinit(gpa);
     cache.deinit();
+    font.deinit();
+}
+
+pub fn onEvent(event: *const zupra.Event) void {
+    switch (event.type) {
+        .MOUSE_SCROLL => {
+            textScale += event.scroll_y / 5;
+        },
+        else => {},
+    }
 }
