@@ -16,7 +16,14 @@ var mouse_scroll: math.Vec2 = .{ .x = 0, .y = 0 };
 pub var mouseX: f32 = 0;
 pub var mouseY: f32 = 0;
 
-pub fn update(event: *const sokol.app.Event) void {
+pub fn _updateFrame() void {
+    just_pressed_keys = EnumSet(Keycode).empty;
+    just_pressed_button = EnumSet(Mousebutton).empty;
+    mouse_delta = .{ .x = 0, .y = 0 };
+    mouse_scroll = .{ .x = 0, .y = 0 };
+}
+
+pub fn _updateEvent(event: *const sokol.app.Event) void {
     switch (event.type) {
         .FOCUSED => {
             focused = true;

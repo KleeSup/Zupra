@@ -28,7 +28,7 @@ const gfx = @import("../graphics/graphics.zig");
 const tex = @import("../graphics/texture.zig");
 const math = @import("../math.zig");
 const SpriteBatch = @import("spritebatch.zig").SpriteBatch;
-const Camera2D = @import("camera.zig").Camera2D;
+const Camera2D = @import("camera2d.zig").Camera2D;
 
 const stb = zupra.intern.ttf; // vendored stb_truetype
 

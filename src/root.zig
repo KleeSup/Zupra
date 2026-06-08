@@ -5,6 +5,7 @@ pub const render = @import("render/render.zig");
 pub const graphics = @import("graphics/graphics.zig");
 pub const app = @import("app.zig");
 pub const input = @import("input/input.zig");
+pub const time = sokol.time;
 
 pub const Event = sokol.app.Event;
 
@@ -167,11 +168,12 @@ export fn _deinit() void {
 }
 
 export fn _render() void {
+    input._updateFrame();
     user_config.renderFn();
     sokol.gfx.commit();
 }
 export fn _event(event: [*c]const sokol.app.Event) callconv(.c) void {
-    input.update(event);
+    input._updateEvent(event);
     if (user_config.eventFn) |eventFn| {
         eventFn(event);
     }

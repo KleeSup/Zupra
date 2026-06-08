@@ -16,7 +16,7 @@ const zupra = @import("../root.zig");
 
 const gfx = @import("../graphics/graphics.zig");
 const pipeline = @import("../graphics/pipeline.zig");
-const cam = @import("camera.zig");
+const cam = @import("camera2d.zig");
 const math = @import("../math.zig");
 
 const shd = @import("shaders").debug;

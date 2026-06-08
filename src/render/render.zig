@@ -1,9 +1,18 @@
-pub const Camera2D = @import("camera.zig").Camera2D;
+pub const Camera2D = @import("camera2d.zig").Camera2D;
+pub const Camera3D = @import("camera3d.zig").Camera3D;
 pub const SpriteBatch = @import("spritebatch.zig").SpriteBatch;
 pub const SpriteBatchOptions = @import("spritebatch.zig").SpriteBatchOptions;
-pub const anim = @import("animation.zig");
+pub const Animation = @import("animation.zig").Animation;
+pub const AnimationMode = @import("animation.zig").AnimationMode;
+pub const StateAnimation = @import("animation.zig").StateAnimation;
 pub const DebugBatch = @import("debugbatch.zig").DebugBatch;
 pub const DebugBatchOptions = @import("debugbatch.zig").DebugBatchOptions;
 pub const Font = @import("font.zig").Font;
 pub const FontOptions = @import("font.zig").FontOptions;
 pub const TextBatch2D = @import("font.zig").TextBatch2D;
+
+pub const Mesh = @import("mesh.zig").Mesh;
+pub const MeshRenderer = @import("mesh.zig").MeshRenderer;
+pub const Material = @import("mesh.zig").Material;
+pub const DirectionalLight = @import("mesh.zig").DirectionalLight;
+pub const MeshBuilder = @import("meshbuilder.zig").MeshBuilder;

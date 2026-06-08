@@ -1,33 +1,69 @@
-//! examples/fancy/main.zig
+//! examples/playground.zig
 //!
-//! Demonstrates using a CUSTOM sprite shader with the SpriteBatch.
-//! Run with: zig build run-fancy
-//!
-//! The fancy shader (shaders/sprite_fancy.glsl) is drop-in compatible with the
-//! batcher's vertex/uniform contract, so the only "extension" the user does is:
-//!   1. write a .glsl honoring the contract,
-//!   2. makeShader() from its generated desc,
-//!   3. pass it to batch.beginEx(.., custom_shader).
-//! No SpriteBatch changes required.
+//! 3D render test: a spinning, directionally-lit cube.
+//! Geometry is hand-authored (24 verts, per-face normals) so we can test the
+//! mesh path before meshbuilder exists.
 
 const std = @import("std");
 const zupra = @import("zupra");
-const sokol = zupra.intern.sokol; // re-exported by the framework
+const sokol = zupra.intern.sokol;
+const zm = zupra.math.zm;
 
-const img_data = @embedFile("assets/icon.png");
+const Vertex3D = zupra.graphics.Vertex3D;
+const IndexData = zupra.graphics.IndexData;
 
 var gpa: std.mem.Allocator = undefined;
 var cache: zupra.graphics.pipeline.PipelineCache = undefined;
-var batch: zupra.render.SpriteBatch = undefined;
-var cam: zupra.render.Camera2D = undefined;
-var icon: zupra.graphics.texture.Texture = undefined;
-var fancy: zupra.graphics.ShaderProgram = undefined;
-var dbatch: zupra.render.DebugBatch = undefined;
-var font: zupra.render.Font = undefined;
-const shader_file = @import("assets/shaders/sprite_fancy.glsl.zig");
+var renderer: zupra.render.MeshRenderer = undefined;
+var cam: zupra.render.Camera3D = undefined;
+var cube: zupra.render.Mesh = undefined;
 
 var last_ticks: u64 = 0;
 var t: f32 = 0;
+
+// Unit cube, 4 verts per face with that face's normal (flat shading).
+const s: f32 = 0.5;
+const cube_verts = [_]Vertex3D{
+    // +X
+    .{ .pos = .{ s, -s, -s }, .normal = .{ 1, 0, 0 }, .uv = .{ 0, 0 } },
+    .{ .pos = .{ s, s, -s }, .normal = .{ 1, 0, 0 }, .uv = .{ 0, 1 } },
+    .{ .pos = .{ s, s, s }, .normal = .{ 1, 0, 0 }, .uv = .{ 1, 1 } },
+    .{ .pos = .{ s, -s, s }, .normal = .{ 1, 0, 0 }, .uv = .{ 1, 0 } },
+    // -X
+    .{ .pos = .{ -s, -s, s }, .normal = .{ -1, 0, 0 }, .uv = .{ 0, 0 } },
+    .{ .pos = .{ -s, s, s }, .normal = .{ -1, 0, 0 }, .uv = .{ 0, 1 } },
+    .{ .pos = .{ -s, s, -s }, .normal = .{ -1, 0, 0 }, .uv = .{ 1, 1 } },
+    .{ .pos = .{ -s, -s, -s }, .normal = .{ -1, 0, 0 }, .uv = .{ 1, 0 } },
+    // +Y
+    .{ .pos = .{ -s, s, -s }, .normal = .{ 0, 1, 0 }, .uv = .{ 0, 0 } },
+    .{ .pos = .{ -s, s, s }, .normal = .{ 0, 1, 0 }, .uv = .{ 0, 1 } },
+    .{ .pos = .{ s, s, s }, .normal = .{ 0, 1, 0 }, .uv = .{ 1, 1 } },
+    .{ .pos = .{ s, s, -s }, .normal = .{ 0, 1, 0 }, .uv = .{ 1, 0 } },
+    // -Y
+    .{ .pos = .{ -s, -s, s }, .normal = .{ 0, -1, 0 }, .uv = .{ 0, 0 } },
+    .{ .pos = .{ -s, -s, -s }, .normal = .{ 0, -1, 0 }, .uv = .{ 0, 1 } },
+    .{ .pos = .{ s, -s, -s }, .normal = .{ 0, -1, 0 }, .uv = .{ 1, 1 } },
+    .{ .pos = .{ s, -s, s }, .normal = .{ 0, -1, 0 }, .uv = .{ 1, 0 } },
+    // +Z
+    .{ .pos = .{ s, -s, s }, .normal = .{ 0, 0, 1 }, .uv = .{ 0, 0 } },
+    .{ .pos = .{ s, s, s }, .normal = .{ 0, 0, 1 }, .uv = .{ 0, 1 } },
+    .{ .pos = .{ -s, s, s }, .normal = .{ 0, 0, 1 }, .uv = .{ 1, 1 } },
+    .{ .pos = .{ -s, -s, s }, .normal = .{ 0, 0, 1 }, .uv = .{ 1, 0 } },
+    // -Z
+    .{ .pos = .{ -s, -s, -s }, .normal = .{ 0, 0, -1 }, .uv = .{ 0, 0 } },
+    .{ .pos = .{ -s, s, -s }, .normal = .{ 0, 0, -1 }, .uv = .{ 0, 1 } },
+    .{ .pos = .{ s, s, -s }, .normal = .{ 0, 0, -1 }, .uv = .{ 1, 1 } },
+    .{ .pos = .{ s, -s, -s }, .normal = .{ 0, 0, -1 }, .uv = .{ 1, 0 } },
+};
+
+var cube_indices = [_]u32{
+    0, 1, 2, 0, 2, 3, // +X
+    4, 5, 6, 4, 6, 7, // -X
+    8, 9, 10, 8, 10, 11, // +Y
+    12, 13, 14, 12, 14, 15, // -Y
+    16, 17, 18, 16, 18, 19, // +Z
+    20, 21, 22, 20, 22, 23, // -Z
+};
 
 pub fn main(ctx: std.process.Init) !void {
     gpa = ctx.gpa;
@@ -35,85 +71,43 @@ pub fn main(ctx: std.process.Init) !void {
         .initFn = init,
         .renderFn = render,
         .deinitFn = deinit,
-        .eventFn = onEvent,
     });
 }
 
 pub fn init() void {
-    zupra.log.info("Fancy shader example", .{});
     cache = .init(gpa);
-    batch = zupra.render.SpriteBatch.init(gpa, &cache, .{}) catch unreachable;
-    dbatch = zupra.render.DebugBatch.init(gpa, &cache, .{}) catch unreachable;
-    cam = .init(1280, 720);
-    icon = zupra.graphics.texture.Texture.initBuffer(img_data) catch unreachable;
+    renderer = zupra.render.MeshRenderer.init(&cache);
 
-    // Compile-time-generated desc for shaders/sprite_fancy.glsl.
-    fancy = zupra.graphics.ShaderProgram.init(shader_file.spriteFancyShaderDesc, .{ .slots = .{ .fs_params = shader_file.UB_fs_params } });
+    cam = zupra.render.Camera3D.init(16.0 / 9.0);
+    cam.position = .{ .x = 3, .y = 2.5, .z = -5 };
+    cam.target = .{ .x = 0, .y = 0, .z = 0 };
 
-    font = zupra.render.Font.initFromMemory(gpa, @embedFile("assets/OpenSans-Regular.ttf"), .{}) catch unreachable;
+    cube = zupra.render.MeshBuilder.cube(3, 3, 3); //zupra.render.Mesh.init(&cube_verts, .{ .u32 = &cube_indices });
 
     last_ticks = sokol.time.now();
 }
 
-var textScale: f32 = 2;
 pub fn render() void {
-    // Frame-rate independent time (vsync is off by default in Config).
     const now = sokol.time.now();
     t += @floatCast(sokol.time.sec(sokol.time.diff(now, last_ticks)));
     last_ticks = now;
 
-    // Build a sprite fresh each frame and animate its transform on the CPU.
-    var sprite = zupra.graphics.texture.Sprite.init(.full(icon));
+    // Keep aspect correct on resize / high-DPI (same lesson as the 2D camera).
+    cam.setViewport(sokol.app.widthf(), sokol.app.heightf());
 
-    const base_w = sprite.dest.width;
-    const base_h = sprite.dest.height;
-    const pulse = 1.0 + 0.25 * @sin(t * 3.0);
-    sprite.setSize(base_w * pulse, base_h * pulse);
-    sprite.setOrigin(sprite.dest.width * 0.5, sprite.dest.height * 0.5); // spin about center
+    // Tumble: rotate around Y and X over time.
+    const model = zm.mul(zm.rotationX(t * 0.6), zm.rotationY(t));
 
-    const cx: f32 = 640.0;
-    const cy: f32 = 360.0;
-    const orbit: f32 = 140.0;
-    sprite.setPosition(cx + @cos(t) * orbit, cy + @sin(t) * orbit);
-    sprite.setRotation(t * 1.5);
+    const material = zupra.render.Material{ .base_color = .{ .r = 0.85, .g = 0.45, .b = 0.2, .a = 1 } };
 
-    zupra.beginDrawingClear(zupra.colors.BLACK);
-
-    dbatch.begin(cam);
-    dbatch.drawLine(.{ .x = 100, .y = 100 }, .{ .x = zupra.input.mouseX, .y = zupra.input.mouseY }, zupra.colors.YELLOW);
-    dbatch.end();
-
-    var textBatch = zupra.render.TextBatch2D.init(&font, &batch);
-    textBatch.begin(cam);
-    textBatch.draw("Hello World", 100, 100, textScale, zupra.colors.WHITE);
-    textBatch.end();
-
-    // The whole point: hand the batch our custom shader. PassSignature defaults
-    // to the swapchain (.{}). Everything else is the normal batcher path.
-
-    var p = shader_file.FsParams{ .time = t };
-
-    batch.beginEx(cam, .alpha, .{}, fancy, std.mem.asBytes(&p));
-    batch.draw(sprite);
-    batch.end();
-
+    zupra.beginDrawingClear(.{ .r = 0.05, .g = 0.06, .b = 0.08, .a = 1 });
+    renderer.begin(cam, .{}); // default directional light
+    renderer.draw(cube, model, material);
+    renderer.end();
     zupra.endDrawing();
 }
 
 pub fn deinit() void {
-    fancy.deinit();
-    icon.deinit();
-    batch.deinit(gpa);
-    dbatch.deinit(gpa);
+    cube.deinit();
     cache.deinit();
-    font.deinit();
-}
-
-pub fn onEvent(event: *const zupra.Event) void {
-    switch (event.type) {
-        .MOUSE_SCROLL => {
-            textScale += event.scroll_y / 5;
-        },
-        else => {},
-    }
 }
