@@ -16,3 +16,6 @@ pub const MeshRenderer = @import("mesh.zig").MeshRenderer;
 pub const Material = @import("mesh.zig").Material;
 pub const DirectionalLight = @import("mesh.zig").DirectionalLight;
 pub const MeshBuilder = @import("meshbuilder.zig").MeshBuilder;
+pub const Model = @import("model.zig").Model;
+pub const ModelInstance = @import("model.zig").ModelInstance;
+pub const ModelBatch = @import("model.zig").ModelBatch;

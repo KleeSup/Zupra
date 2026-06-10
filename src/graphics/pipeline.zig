@@ -125,6 +125,7 @@ pub const PipelineKey = struct {
     blend: BlendMode = .none,
     depth_test: bool = false,
     depth_write: bool = false,
+    face_winding: sg.FaceWinding = .CCW,
     /// false = non-indexed draw (sokol index_type = .NONE). Debug lines/fills
     /// and fullscreen post-fx triangles use this; indexed meshes/sprites = true.
     indexed: bool = true,
@@ -146,6 +147,7 @@ fn buildDesc(key: PipelineKey) sg.PipelineDesc {
         .primitive_type = key.primitive,
         .cull_mode = key.cull,
         .sample_count = @intCast(key.pass.sample_count),
+        .face_winding = key.face_winding,
     };
 
     desc.depth = .{
