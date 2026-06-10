@@ -22,6 +22,7 @@ pub fn main(ctx: std.process.Init) !void {
         .initFn = init,
         .renderFn = render,
         .deinitFn = deinit,
+        .sample_count = 1,
     });
 }
 
@@ -33,7 +34,7 @@ pub fn init() void {
     cam.position = .{ .x = 3, .y = 2.5, .z = -5 };
     cam.target = .{ .x = 0, .y = 0, .z = 0 };
 
-    const cube = zupra.render.MeshBuilder.sphere(gpa, 1, 1, 1) catch unreachable;
+    const cube = zupra.render.MeshBuilder.cube(1, 1, 1);
     model = zupra.render.Model.fromMesh(gpa, cube, .{
         .base_color = .{ .r = 0.85, .g = 0.45, .b = 0.2, .a = 1 },
     }) catch unreachable;

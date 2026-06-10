@@ -86,7 +86,7 @@ pub const SpriteBatch = struct {
     active: bool = false,
     mvp: Matrix = undefined,
     blend: BlendMode = .alpha,
-    pass: PassSignature = PassSignature.swapchain,
+    pass: PassSignature = .{},
     custom_shader: ?ShaderProgram = null,
 
     // current run
@@ -154,7 +154,7 @@ pub const SpriteBatch = struct {
     /// Begin a batch. `blend` and any `shader` override apply to the whole span.
     /// `pass` defaults to the swapchain; pass an offscreen signature for FBO/MRT.
     pub fn begin(self: *SpriteBatch, camera: Camera2D, blend: BlendMode) void {
-        self.beginEx(camera, blend, PassSignature.swapchain, null, null);
+        self.beginEx(camera, blend, PassSignature.swapchainPass(), null, null);
     }
 
     pub fn beginEx(

@@ -122,7 +122,7 @@ pub fn deinitShared() void {
 pub const MeshRenderer = struct {
     cache: *PipelineCache,
     shader: ShaderProgram,
-    pass: PassSignature = PassSignature.swapchain,
+    pass: PassSignature = .{},
 
     // per-frame state captured at begin()
     view_proj: Matrix = undefined,
@@ -134,7 +134,7 @@ pub const MeshRenderer = struct {
     }
 
     pub fn begin(self: *MeshRenderer, camera: Camera3D, light: DirectionalLight) void {
-        self.beginEx(camera, light, PassSignature.swapchain);
+        self.beginEx(camera, light, PassSignature.swapchainPass());
     }
 
     pub fn beginEx(self: *MeshRenderer, camera: Camera3D, light: DirectionalLight, pass: PassSignature) void {

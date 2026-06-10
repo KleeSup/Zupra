@@ -100,7 +100,9 @@ pub const PassSignature = struct {
     sample_count: u8 = 1,
 
     /// Default swapchain target (1 color + depth, formats resolved by sokol).
-    pub const swapchain = PassSignature{};
+    pub fn swapchainPass() PassSignature {
+        return .{ .sample_count = @intCast(@import("sokol").app.sampleCount()) };
+    }
 
     pub fn swapchainMsaa(samples: u8) PassSignature {
         return .{ .sample_count = samples };
