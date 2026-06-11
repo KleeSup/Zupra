@@ -37,9 +37,15 @@ const Vec3 = math.Vec3;
 const Color = zupra.Color;
 const Material = @import("material.zig").Material;
 const Light = @import("light.zig").Light;
+const LightParams = @import("light.zig").LightParams;
+const packLightParams = @import("light.zig").packLightParams;
+const Environment = @import("environment.zig").Environment;
 
 const VsParams = shd.VsParams;
-const FsParams = shd.FsParams;
+const FsParams = extern struct {
+    base_color: [4]f32,
+    lights: LightParams,
+};
 
 // --- mesh resource ---
 
@@ -114,22 +120,22 @@ pub const MeshRenderer = struct {
 
     // per-frame state captured at begin()
     view_proj: Matrix = undefined,
-    light: Light = .{},
+    lights: LightParams = undefined,
     active: bool = false,
 
     pub fn init(cache: *PipelineCache) MeshRenderer {
         return .{ .cache = cache, .shader = sharedShader() };
     }
 
-    pub fn begin(self: *MeshRenderer, camera: Camera3D, light: Light) void {
-        self.beginEx(camera, light, PassSignature.swapchainPass());
+    pub fn begin(self: *MeshRenderer, camera: Camera3D, env: Environment) void {
+        self.beginEx(camera, env, PassSignature.swapchainPass());
     }
 
-    pub fn beginEx(self: *MeshRenderer, camera: Camera3D, light: Light, pass: PassSignature) void {
+    pub fn beginEx(self: *MeshRenderer, camera: Camera3D, env: Environment, pass: PassSignature) void {
         std.debug.assert(!self.active);
         self.active = true;
         self.view_proj = camera.viewProjection();
-        self.light = light;
+        self.lights = packLightParams(env.lights, env.ambient, camera.position);
         self.pass = pass;
     }
 
@@ -161,10 +167,8 @@ pub const MeshRenderer = struct {
             .view_proj = @bitCast(self.view_proj),
         };
         var fs = FsParams{
-            .base_color = colorVec4(material.base_color),
-            .light_dir = dirVec4(self.light.direction.mul(-1)), // travel dir -> to-light dir
-            .light_color = colorVec3(self.light.color),
-            .ambient = colorVec3(self.light.ambient),
+            .base_color = .{ material.base_color.r, material.base_color.g, material.base_color.b, material.base_color.a },
+            .lights = self.lights,
         };
 
         sg.applyPipeline(pip);
@@ -179,13 +183,3 @@ pub const MeshRenderer = struct {
         self.active = false;
     }
 };
-
-inline fn colorVec4(c: Color) [4]f32 {
-    return .{ c.r, c.g, c.b, c.a };
-}
-inline fn colorVec3(c: Color) [4]f32 {
-    return .{ c.r, c.g, c.b, 0 };
-}
-inline fn dirVec4(d: Vec3) [4]f32 {
-    return .{ d.x, d.y, d.z, 0 };
-}

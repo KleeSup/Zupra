@@ -30,7 +30,8 @@ const PassSignature = pipeline.PassSignature;
 const Vec3 = math.Vec3;
 const Quaternion = math.Quaternion;
 const Matrix = math.Matrix;
-const Light = @import("light.zig").Light;
+const Color = @import("../root.zig").Color;
+const Environment = @import("environment.zig").Environment;
 
 pub const Model = struct {
     meshes: []Mesh,
@@ -108,24 +109,24 @@ pub const ModelInstance = struct {
 
 pub const ModelBatch = struct {
     renderer: MeshRenderer,
-    light: Light = .{},
+    env: Environment = .{},
 
     pub fn init(cache: *PipelineCache) ModelBatch {
         return .{ .renderer = MeshRenderer.init(cache) };
     }
 
     /// Set the directional light used by subsequent begin() calls.
-    pub fn setLight(self: *ModelBatch, light: Light) void {
-        self.light = light;
+    pub fn setEnvironment(self: *ModelBatch, env: Environment) void {
+        self.env = env;
     }
 
     pub fn begin(self: *ModelBatch, camera: Camera3D) void {
-        self.renderer.begin(camera, self.light);
+        self.renderer.begin(camera, self.env);
     }
 
-    pub fn beginEx(self: *ModelBatch, camera: Camera3D, light: Light, pass: PassSignature) void {
-        self.light = light;
-        self.renderer.beginEx(camera, light, pass);
+    pub fn beginEx(self: *ModelBatch, camera: Camera3D, env: Environment, pass: PassSignature) void {
+        self.env = env;
+        self.renderer.beginEx(camera, env, pass);
     }
 
     /// Draw every submesh of the instance's model with its mapped material,

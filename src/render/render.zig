@@ -15,7 +15,6 @@ pub const FramebufferOptions = @import("framebuffer.zig").FramebufferOptions;
 
 pub const Mesh = @import("mesh.zig").Mesh;
 pub const MeshRenderer = @import("mesh.zig").MeshRenderer;
-pub const DirectionalLight = @import("mesh.zig").DirectionalLight;
 pub const MeshBuilder = @import("meshbuilder.zig").MeshBuilder;
 pub const Model = @import("model.zig").Model;
 pub const ModelInstance = @import("model.zig").ModelInstance;
@@ -23,7 +22,9 @@ pub const ModelBatch = @import("model.zig").ModelBatch;
 
 pub const GBuffer = @import("gbuffer.zig").GBuffer;
 pub const GeometryRenderer = @import("deferred.zig").GeometryRenderer;
-pub const Light = @import("deferred.zig").Light;
-pub const LightType = @import("deferred.zig").LightType;
+pub const Light = @import("light.zig").Light;
+pub const LightType = @import("light.zig").LightType;
 pub const DeferredRenderer = @import("deferred.zig").DeferredRenderer;
 pub const Material = @import("material.zig").Material;
+
+pub const Environment = @import("environment.zig").Environment;

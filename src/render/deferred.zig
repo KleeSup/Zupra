@@ -46,6 +46,7 @@ const Color = zupra.Color;
 const Light = @import("light.zig").Light;
 const LightParams = @import("light.zig").LightParams;
 const MAX_LIGHTS = @import("light.zig").MAX_LIGHTS;
+const Environment = @import("environment.zig").Environment;
 
 // =====================================================================
 // Geometry pass
@@ -179,15 +180,14 @@ pub const DeferredRenderer = struct {
         self: *DeferredRenderer,
         gbuf: GBuffer,
         camera: Camera3D,
-        lights: []const Light,
-        ambient: Color,
+        env: Environment,
         pass: PassSignature,
     ) void {
-        const n = @min(lights.len, MAX_LIGHTS);
+        const n = @min(env.lights.len, MAX_LIGHTS);
 
         var params = LightParams{
             .camera_pos = .{ camera.position.x, camera.position.y, camera.position.z, 0 },
-            .ambient_count = .{ ambient.r, ambient.g, ambient.b, @floatFromInt(n) },
+            .ambient_count = .{ env.ambient.r, env.ambient.g, env.ambient.b, @floatFromInt(n) },
             .light_dir = undefined,
             .light_color = undefined,
         };
@@ -195,7 +195,7 @@ pub const DeferredRenderer = struct {
             params.light_dir[i] = .{ 0, 0, 0, 0 };
             params.light_color[i] = .{ 0, 0, 0, 0 };
         }
-        for (lights[0..n], 0..) |l, i| {
+        for (0..n, env.lights) |i, l| {
             // directional: direction-to-light = -travel direction
             params.light_dir[i] = .{ -l.direction.x, -l.direction.y, -l.direction.z, @floatFromInt(@intFromEnum(l.type)) };
             params.light_color[i] = .{ l.color.r, l.color.g, l.color.b, l.intensity };

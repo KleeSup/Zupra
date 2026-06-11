@@ -1,5 +1,6 @@
 const Vec3 = @import("../math.zig").Vec3;
 const Color = @import("../root.zig").Color;
+const Environment = @import("environment.zig").Environment;
 
 // =====================================================================
 // Lights
@@ -28,9 +29,26 @@ pub const Light = struct {
 pub const MAX_LIGHTS = 16;
 
 // std140-matching uniform block (vec4 arrays pack tightly at 16 bytes each).
-const LightParams = extern struct {
+pub const LightParams = extern struct {
     camera_pos: [4]f32,
     ambient_count: [4]f32,
     light_dir: [MAX_LIGHTS][4]f32,
     light_color: [MAX_LIGHTS][4]f32,
 };
+
+pub fn packLightParams(lights: []const Light, ambient: Color, camera_pos: Vec3) LightParams {
+    var p: LightParams = undefined;
+    p.camera_pos = .{ camera_pos.x, camera_pos.y, camera_pos.z, 0 };
+    const n = @min(lights.len, MAX_LIGHTS);
+    p.ambient_count = .{ ambient.r, ambient.g, ambient.b, @floatFromInt(n) };
+    for (0..MAX_LIGHTS) |i| {
+        p.light_dir[i] = .{ 0, 0, 0, 0 };
+        p.light_color[i] = .{ 0, 0, 0, 0 };
+    }
+    for (lights[0..n], 0..) |l, i| {
+        // directional: direction-to-light = -travel direction
+        p.light_dir[i] = .{ -l.direction.x, -l.direction.y, -l.direction.z, @floatFromInt(@intFromEnum(l.type)) };
+        p.light_color[i] = .{ l.color.r, l.color.g, l.color.b, l.intensity };
+    }
+    return p;
+}
