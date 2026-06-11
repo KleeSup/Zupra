@@ -35,6 +35,8 @@ const PassSignature = pipeline.PassSignature;
 const Matrix = math.Matrix;
 const Vec3 = math.Vec3;
 const Color = zupra.Color;
+const Material = @import("material.zig").Material;
+const Light = @import("light.zig").Light;
 
 const VsParams = shd.VsParams;
 const FsParams = shd.FsParams;
@@ -82,20 +84,6 @@ pub const Mesh = struct {
     }
 };
 
-// --- material and light ---
-
-pub const Material = struct {
-    base_color: Color = .{ .r = 1, .g = 1, .b = 1, .a = 1 },
-};
-
-pub const DirectionalLight = struct {
-    /// Direction the light travels (e.g. a sun pointing down is {0,-1,0}).
-    /// The shader requires direction-to-light, so it's negated on upload.
-    direction: Vec3 = .{ .x = -0.4, .y = -1, .z = -0.3 },
-    color: Color = .{ .r = 1, .g = 1, .b = 1, .a = 1 },
-    ambient: Color = .{ .r = 0.12, .g = 0.12, .b = 0.14, .a = 1 },
-};
-
 // --- shared mesh shader ---
 
 var shared_shader: ?ShaderProgram = null;
@@ -126,18 +114,18 @@ pub const MeshRenderer = struct {
 
     // per-frame state captured at begin()
     view_proj: Matrix = undefined,
-    light: DirectionalLight = .{},
+    light: Light = .{},
     active: bool = false,
 
     pub fn init(cache: *PipelineCache) MeshRenderer {
         return .{ .cache = cache, .shader = sharedShader() };
     }
 
-    pub fn begin(self: *MeshRenderer, camera: Camera3D, light: DirectionalLight) void {
+    pub fn begin(self: *MeshRenderer, camera: Camera3D, light: Light) void {
         self.beginEx(camera, light, PassSignature.swapchainPass());
     }
 
-    pub fn beginEx(self: *MeshRenderer, camera: Camera3D, light: DirectionalLight, pass: PassSignature) void {
+    pub fn beginEx(self: *MeshRenderer, camera: Camera3D, light: Light, pass: PassSignature) void {
         std.debug.assert(!self.active);
         self.active = true;
         self.view_proj = camera.viewProjection();

@@ -9,6 +9,7 @@ pub const time = sokol.time;
 
 pub const Event = sokol.app.Event;
 
+const Framebuffer = render.Framebuffer;
 const sokol = @import("sokol");
 const std = @import("std");
 const zstbi = @import("zstbi");
@@ -70,6 +71,25 @@ pub fn beginDrawingClear(clear_color: Color) void {
 /// This is useful for drawing on top of existing content, but make sure to call endDrawing() when you're done.
 pub fn beginDrawing() void {
     beginDrawingPass(.{ .swapchain = sokol.glue.swapchain() });
+}
+
+/// Begin a pass that renders INTO a framebuffer instead of the swapchain.
+/// Clears it to `clear_color` first.
+pub fn beginDrawingFramebufferClear(fb: Framebuffer, clear_color: Color) void {
+    beginFramebufferPass(fb, fb.pass(buildClearAction(clear_color)));
+}
+
+/// Begin a framebuffer pass without clearing (draw on top of existing content).
+pub fn beginDrawingFramebuffer(fb: Framebuffer) void {
+    beginFramebufferPass(fb, fb.pass(.{}));
+}
+
+fn beginFramebufferPass(fb: Framebuffer, pass: sokol.gfx.Pass) void {
+    _ = fb;
+    if (drawing) @panic("endDrawing() needs to be called before beginDrawing()!");
+    drawing = true;
+    fb_drawing = true;
+    sokol.gfx.beginPass(pass);
 }
 
 /// End the current drawing pass. This will submit all drawing commands to the GPU and present the frame if you're drawing to the swapchain.

@@ -23,14 +23,14 @@ const Camera3D = @import("camera3d.zig").Camera3D;
 const pipeline = @import("../graphics/pipeline.zig");
 
 const Mesh = mesh_mod.Mesh;
-const Material = mesh_mod.Material;
-const DirectionalLight = mesh_mod.DirectionalLight;
+const Material = @import("material.zig").Material;
 const MeshRenderer = mesh_mod.MeshRenderer;
 const PipelineCache = pipeline.PipelineCache;
 const PassSignature = pipeline.PassSignature;
 const Vec3 = math.Vec3;
 const Quaternion = math.Quaternion;
 const Matrix = math.Matrix;
+const Light = @import("light.zig").Light;
 
 pub const Model = struct {
     meshes: []Mesh,
@@ -108,14 +108,14 @@ pub const ModelInstance = struct {
 
 pub const ModelBatch = struct {
     renderer: MeshRenderer,
-    light: DirectionalLight = .{},
+    light: Light = .{},
 
     pub fn init(cache: *PipelineCache) ModelBatch {
         return .{ .renderer = MeshRenderer.init(cache) };
     }
 
     /// Set the directional light used by subsequent begin() calls.
-    pub fn setLight(self: *ModelBatch, light: DirectionalLight) void {
+    pub fn setLight(self: *ModelBatch, light: Light) void {
         self.light = light;
     }
 
@@ -123,7 +123,7 @@ pub const ModelBatch = struct {
         self.renderer.begin(camera, self.light);
     }
 
-    pub fn beginEx(self: *ModelBatch, camera: Camera3D, light: DirectionalLight, pass: PassSignature) void {
+    pub fn beginEx(self: *ModelBatch, camera: Camera3D, light: Light, pass: PassSignature) void {
         self.light = light;
         self.renderer.beginEx(camera, light, pass);
     }
