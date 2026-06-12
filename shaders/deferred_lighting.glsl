@@ -29,7 +29,7 @@ layout(binding=2) uniform texture2D tex_position;
 layout(binding=3) uniform texture2D tex_material;
 layout(binding=0) uniform sampler smp;
 
-layout(binding=0) uniform light_params {
+layout(binding=0) uniform light_params {   // (mesh.glsl: binding=1, and base_color first)
     vec4 camera_pos;
     vec4 ambient_count;
     vec4 light_pos[MAX_LIGHTS];
@@ -64,8 +64,9 @@ vec3 fresnelSchlick(float cosT, vec3 F0) {
 }
 
 void lightAt(int i, vec3 world_pos, out vec3 L, out float att) {
-    int type = int(light_pos[i].w);
+    L = vec3(0.0);   // add this line
     att = 1.0;
+    int type = int(light_pos[i].w);
     if (type == 0) {
         L = normalize(-light_dir[i].xyz);
         return;
@@ -76,7 +77,7 @@ void lightAt(int i, vec3 world_pos, out vec3 L, out float att) {
 
     float range = light_dir[i].w;
     float a = 1.0 / (dist * dist + 0.0001);
-    float window = clamp(1.0 - pow(dist / range, 4.0), 0.0, 1.0);
+    float window = clamp(1.0 - pow(clamp(dist / range, 0.0, 1.0), 4.0), 0.0, 1.0);
     att = a * window * window;
 
     if (type == 2) {

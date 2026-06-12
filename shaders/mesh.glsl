@@ -53,8 +53,10 @@ layout(binding=1) uniform fs_params {
     vec4 base_color;
     vec4 camera_pos;
     vec4 ambient_count;
+    vec4 light_pos[MAX_LIGHTS];
     vec4 light_dir[MAX_LIGHTS];
     vec4 light_color[MAX_LIGHTS];
+    vec4 light_spot[MAX_LIGHTS];
 };
 
 in vec3 v_world_pos;

@@ -188,7 +188,7 @@ pub const DeferredRenderer = struct {
 
         const key = PipelineKey{
             .shader = self.shader,
-            .layout = .sprite, // fullscreen tri uses pos+uv (color slot unused)
+            .layout = .fullscreen, // fullscreen tri uses pos+uv (color slot unused)
             .index_type = .u32,
             .indexed = false,
             .pass = pass,

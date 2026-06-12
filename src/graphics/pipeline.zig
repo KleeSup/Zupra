@@ -15,6 +15,7 @@ pub const VertexLayout = enum {
     sprite, // Vertex2D
     mesh, // Vertex3D
     debug, // VertexDebug
+    fullscreen, // Vertex2D buffer, only pos+uv consumed (screen-space passes)
 
     /// Build the sokol vertex-layout state for this layout. Offsets and stride
     /// are set explicitly so behavior never depends on sokol's auto-layout.
@@ -37,6 +38,12 @@ pub const VertexLayout = enum {
                 l.buffers[0].stride = @sizeOf(VertexDebug);
                 l.attrs[0] = .{ .offset = @offsetOf(VertexDebug, "pos"), .format = .FLOAT3 };
                 l.attrs[1] = .{ .offset = @offsetOf(VertexDebug, "color"), .format = .UBYTE4N };
+            },
+            .fullscreen => {
+                l.buffers[0].stride = @sizeOf(Vertex2D);
+                l.attrs[0] = .{ .offset = @offsetOf(Vertex2D, "pos"), .format = .FLOAT2 };
+                l.attrs[1] = .{ .offset = @offsetOf(Vertex2D, "uv"), .format = .FLOAT2 };
+                // no attrs[2]: matches the 2-input fullscreen shaders
             },
         }
         return l;

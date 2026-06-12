@@ -53,7 +53,7 @@ pub const Present = struct {
     pub fn render(self: *Present, hdr: Texture, pass: PassSignature) void {
         const key = PipelineKey{
             .shader = self.shader,
-            .layout = .sprite, // fullscreen tri: pos + uv (color slot unused)
+            .layout = .fullscreen, // fullscreen tri: pos + uv (color slot unused)
             .index_type = .u32,
             .indexed = false,
             .pass = pass,
