@@ -85,7 +85,7 @@ pub const MeshBuilder = struct {
             .{ .pos = .{ x, 0, -z }, .normal = .{ 0, 1, 0 }, .uv = .{ 1, 1 } },
             .{ .pos = .{ -x, 0, -z }, .normal = .{ 0, 1, 0 }, .uv = .{ 0, 1 } },
         };
-        var indices = [6]u16{ 0, 1, 2, 0, 2, 3 };
+        var indices = [6]u16{ 0, 2, 1, 0, 3, 2 }; // was { 0, 1, 2, 0, 2, 3 }
         return Mesh.init(&verts, .{ .u16 = &indices });
     }
 

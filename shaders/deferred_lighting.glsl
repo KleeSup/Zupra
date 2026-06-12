@@ -88,13 +88,11 @@ void lightAt(int i, vec3 world_pos, out vec3 L, out float att) {
 }
 
 void main() {
-    vec3 albedo = texture(sampler2D(tex_albedo, smp), v_uv).rgb;
     vec4 nrm = texture(sampler2D(tex_normal, smp), v_uv);
-
-    if (nrm.a < 0.5) { // background
-        frag_color = vec4(albedo, 1.0);
-        return;
+    if (nrm.a < 0.5) {
+        discard; // keep the scene-color clear (= clear_color), matching forward
     }
+    vec3 albedo = texture(sampler2D(tex_albedo, smp), v_uv).rgb;
 
     vec3 world_pos = texture(sampler2D(tex_position, smp), v_uv).xyz;
     vec3 mat = texture(sampler2D(tex_material, smp), v_uv).rgb;

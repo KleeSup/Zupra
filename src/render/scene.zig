@@ -137,10 +137,12 @@ pub const SceneRenderer = struct {
     }
 
     pub fn begin(self: *SceneRenderer, camera: Camera3D, env: Environment) void {
-        self.ensureSize(@intFromFloat(sapp.widthf()), @intFromFloat(sapp.heightf()));
+        const w: u32 = @intFromFloat(sapp.widthf());
+        const h: u32 = @intFromFloat(sapp.heightf());
+        self.ensureSize(w, h);
 
         self.camera = camera;
-        self.camera.setViewport(@floatFromInt(self.width), @floatFromInt(self.height));
+        self.camera.setViewport(@floatFromInt(w), @floatFromInt(h));
         self.env = env;
         self.transparent.clearRetainingCapacity();
 
