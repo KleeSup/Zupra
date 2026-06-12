@@ -31,3 +31,4 @@ pub const Environment = @import("environment.zig").Environment;
 pub const SceneRenderer = @import("scene.zig").SceneRenderer;
 pub const Skybox = @import("skybox.zig").Skybox;
 pub const Cubemap = @import("cubemap.zig").Cubemap;
+pub const Ibl = @import("ibl.zig").Ibl;

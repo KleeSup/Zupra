@@ -1,11 +1,8 @@
 //! src/render/skybox.zig
 //!
-//! Procedural skybox. Renders a gradient sky + sun as the background, into
-//! scene-color, depth-tested against the opaque depth so geometry occludes it.
-//! Later it will also serve as the source environment baked into the IBL maps.
-//!
-//! Appearance is data on the struct (sky colors, sun) so it can be tweaked or
-//! animated (day/night) freely.
+//! Procedural skybox. Renders a gradient sky + sun, either to the screen
+//! (occluded by geometry via depth test) or into a cubemap face (for baking the
+//! IBL environment). The appearance is data so it can be tweaked/animated.
 
 const std = @import("std");
 const sg = @import("sokol").gfx;
@@ -22,6 +19,7 @@ const PipelineCache = pipeline.PipelineCache;
 const PipelineKey = pipeline.PipelineKey;
 const PassSignature = pipeline.PassSignature;
 const Vec3 = math.Vec3;
+const Matrix = math.Matrix;
 const Color = zupra.Color;
 
 const SkyParams = extern struct {
@@ -29,8 +27,8 @@ const SkyParams = extern struct {
     camera_pos: [4]f32,
     sky_top: [4]f32,
     sky_horizon: [4]f32,
-    sun_dir: [4]f32, // xyz dir-to-sun, w = sharpness
-    sun_color: [4]f32, // rgb, w = intensity
+    sun_dir: [4]f32,
+    sun_color: [4]f32,
 };
 
 pub const Skybox = struct {
@@ -38,10 +36,9 @@ pub const Skybox = struct {
     shader: sg.Shader,
     tri: FullscreenTriangle,
 
-    // appearance (linear HDR — this renders into the linear scene-color target)
     sky_top: Color = .{ .r = 0.18, .g = 0.34, .b = 0.65, .a = 1 },
     sky_horizon: Color = .{ .r = 0.65, .g = 0.72, .b = 0.82, .a = 1 },
-    sun_direction: Vec3 = .{ .x = 0.4, .y = 0.8, .z = 0.45 }, // direction TO sun
+    sun_direction: Vec3 = .{ .x = 0.4, .y = 0.8, .z = 0.45 },
     sun_sharpness: f32 = 512.0,
     sun_color: Color = .{ .r = 1.0, .g = 0.95, .b = 0.85, .a = 1 },
     sun_intensity: f32 = 8.0,
@@ -59,10 +56,15 @@ pub const Skybox = struct {
         sg.destroyShader(self.shader);
     }
 
-    /// Draw the sky into the current pass (scene-color + opaque depth). Depth
-    /// test is on (LEQUAL) with no depth write, and the sky is emitted at the
-    /// far plane, so it fills only background pixels.
+    /// Draw to the screen: depth-tested against opaque depth (geometry occludes).
     pub fn render(self: *Skybox, camera: Camera3D, pass: PassSignature) void {
+        self.renderRaw(zm.inverse(camera.viewProjection()), camera.position, pass, true);
+    }
+
+    /// Lower-level: render the sky for an explicit inverse view-projection.
+    /// `depth_test` = true for the screen pass (occluded by geometry), false for
+    /// baking into a cube face (no depth attachment, fill the whole face).
+    pub fn renderRaw(self: *Skybox, inv_vp: Matrix, camera_pos: Vec3, pass: PassSignature, depth_test: bool) void {
         const key = PipelineKey{
             .shader = self.shader,
             .layout = .fullscreen,
@@ -72,7 +74,7 @@ pub const Skybox = struct {
             .primitive = .TRIANGLES,
             .cull = .NONE,
             .blend = .none,
-            .depth_test = true, // occluded by nearer geometry
+            .depth_test = depth_test,
             .depth_write = false,
         };
         const pip = self.cache.get(key) catch |err| {
@@ -80,11 +82,9 @@ pub const Skybox = struct {
             return;
         };
 
-        const inv_vp = zm.inverse(camera.viewProjection());
-
         var params = SkyParams{
             .inv_view_proj = @bitCast(inv_vp),
-            .camera_pos = .{ camera.position.x, camera.position.y, camera.position.z, 0 },
+            .camera_pos = .{ camera_pos.x, camera_pos.y, camera_pos.z, 0 },
             .sky_top = .{ self.sky_top.r, self.sky_top.g, self.sky_top.b, 0 },
             .sky_horizon = .{ self.sky_horizon.r, self.sky_horizon.g, self.sky_horizon.b, 0 },
             .sun_dir = .{ self.sun_direction.x, self.sun_direction.y, self.sun_direction.z, self.sun_sharpness },
