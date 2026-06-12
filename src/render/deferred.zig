@@ -45,6 +45,7 @@ const Vec3 = math.Vec3;
 const Color = zupra.Color;
 const Light = @import("light.zig").Light;
 const LightParams = @import("light.zig").LightParams;
+const packLightParams = @import("light.zig").packLightParams;
 const MAX_LIGHTS = @import("light.zig").MAX_LIGHTS;
 const Environment = @import("environment.zig").Environment;
 
@@ -113,7 +114,7 @@ pub const GeometryRenderer = struct {
         const c = material.base_color;
         var fs = GeoFs{
             .base_color = .{ c.r, c.g, c.b, c.a },
-            .mat_params = .{ material.metallic, material.roughness, material.ao, 0 },
+            .mat_params = .{ material.metallic, material.roughness, material.occlusion_strength, 0 },
         };
 
         sg.applyPipeline(pip);
@@ -183,23 +184,7 @@ pub const DeferredRenderer = struct {
         env: Environment,
         pass: PassSignature,
     ) void {
-        const n = @min(env.lights.len, MAX_LIGHTS);
-
-        var params = LightParams{
-            .camera_pos = .{ camera.position.x, camera.position.y, camera.position.z, 0 },
-            .ambient_count = .{ env.ambient.r, env.ambient.g, env.ambient.b, @floatFromInt(n) },
-            .light_dir = undefined,
-            .light_color = undefined,
-        };
-        for (0..MAX_LIGHTS) |i| {
-            params.light_dir[i] = .{ 0, 0, 0, 0 };
-            params.light_color[i] = .{ 0, 0, 0, 0 };
-        }
-        for (0..n, env.lights) |i, l| {
-            // directional: direction-to-light = -travel direction
-            params.light_dir[i] = .{ -l.direction.x, -l.direction.y, -l.direction.z, @floatFromInt(@intFromEnum(l.type)) };
-            params.light_color[i] = .{ l.color.r, l.color.g, l.color.b, l.intensity };
-        }
+        var params = packLightParams(env.lights(), env.ambient, camera.position);
 
         const key = PipelineKey{
             .shader = self.shader,

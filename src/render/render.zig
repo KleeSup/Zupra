@@ -28,3 +28,4 @@ pub const DeferredRenderer = @import("deferred.zig").DeferredRenderer;
 pub const Material = @import("material.zig").Material;
 
 pub const Environment = @import("environment.zig").Environment;
+pub const SceneRenderer = @import("scene.zig").SceneRenderer;

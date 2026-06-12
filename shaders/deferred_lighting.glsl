@@ -1,22 +1,13 @@
 //------------------------------------------------------------------------------
 //  shaders/deferred_lighting.glsl
 //
-//  Deferred lightning pass. A fullscreen triangle samples the four G-buffer
-//  targets and computes Cook-Torrance PBR per pixel. Directional lights are
-//  implemented; the light input is an array so point/spot are added by
-//  extending the loop, not restructuring.
+//  Deferred LIGHTING pass: fullscreen triangle samples the four G-buffer targets
+//  and runs Cook-Torrance PBR per pixel, over a light ARRAY supporting
+//  directional, point, and spot lights.
 //
-//  G-buffer inputs (texture bindings 0..3):
-//    tex_albedo   rgb base color
-//    tex_normal   xyz world normal (a > 0.5 = geometry present)
-//    tex_position xyz world position
-//    tex_material r metallic, g roughness, b ao
-//
-//  light_params (uniform block 0):
-//    camera_pos     xyz
-//    ambient_count  rgb ambient, w = light count
-//    light_dir[i]   xyz direction-to-light (directional), w = type
-//    light_color[i] rgb color, w = intensity
+//  G-buffer inputs (texture bindings 0..3): albedo, normal(a=geometry mask),
+//  position, material(r metallic, g roughness, b ao).
+//  light_params (uniform block 0): matches LightParams (light.zig).
 //------------------------------------------------------------------------------
 
 @vs vs
@@ -24,7 +15,7 @@ in vec2 pos;
 in vec2 uv;
 out vec2 v_uv;
 void main() {
-    gl_Position = vec4(pos, 0.0, 1.0); // fullscreen triangle, already in clip space
+    gl_Position = vec4(pos, 0.0, 1.0);
     v_uv = uv;
 }
 @end
@@ -41,8 +32,10 @@ layout(binding=0) uniform sampler smp;
 layout(binding=0) uniform light_params {
     vec4 camera_pos;
     vec4 ambient_count;
+    vec4 light_pos[MAX_LIGHTS];
     vec4 light_dir[MAX_LIGHTS];
     vec4 light_color[MAX_LIGHTS];
+    vec4 light_spot[MAX_LIGHTS];
 };
 
 in vec2 v_uv;
@@ -57,28 +50,47 @@ float distributionGGX(vec3 N, vec3 H, float rough) {
     float d = ndh * ndh * (a2 - 1.0) + 1.0;
     return a2 / (PI * d * d);
 }
-
 float geometrySchlickGGX(float ndv, float rough) {
     float r = rough + 1.0;
     float k = (r * r) / 8.0;
     return ndv / (ndv * (1.0 - k) + k);
 }
-
 float geometrySmith(vec3 N, vec3 V, vec3 L, float rough) {
     return geometrySchlickGGX(max(dot(N, V), 0.0), rough) *
            geometrySchlickGGX(max(dot(N, L), 0.0), rough);
 }
-
 vec3 fresnelSchlick(float cosT, vec3 F0) {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosT, 0.0, 1.0), 5.0);
+}
+
+void lightAt(int i, vec3 world_pos, out vec3 L, out float att) {
+    int type = int(light_pos[i].w);
+    att = 1.0;
+    if (type == 0) {
+        L = normalize(-light_dir[i].xyz);
+        return;
+    }
+    vec3 toLight = light_pos[i].xyz - world_pos;
+    float dist = length(toLight);
+    L = toLight / max(dist, 0.0001);
+
+    float range = light_dir[i].w;
+    float a = 1.0 / (dist * dist + 0.0001);
+    float window = clamp(1.0 - pow(dist / range, 4.0), 0.0, 1.0);
+    att = a * window * window;
+
+    if (type == 2) {
+        vec3 axis = normalize(light_dir[i].xyz);
+        float cosA = dot(normalize(world_pos - light_pos[i].xyz), axis);
+        att *= smoothstep(light_spot[i].y, light_spot[i].x, cosA);
+    }
 }
 
 void main() {
     vec3 albedo = texture(sampler2D(tex_albedo, smp), v_uv).rgb;
     vec4 nrm = texture(sampler2D(tex_normal, smp), v_uv);
 
-    // Background (no geometry written here): show clear color (black albedo).
-    if (nrm.a < 0.5) {
+    if (nrm.a < 0.5) { // background
         frag_color = vec4(albedo, 1.0);
         return;
     }
@@ -97,9 +109,10 @@ void main() {
     int count = int(ambient_count.w);
     vec3 Lo = vec3(0.0);
     for (int i = 0; i < count; i++) {
-        // Directional: light_dir is the direction TO the light.
-        vec3 L = normalize(light_dir[i].xyz);
-        vec3 radiance = light_color[i].rgb * light_color[i].w;
+        vec3 L;
+        float att;
+        lightAt(i, world_pos, L, att);
+        vec3 radiance = light_color[i].rgb * light_color[i].w * att;
 
         vec3 H = normalize(V + L);
         float ndl = max(dot(N, L), 0.0);
@@ -115,12 +128,9 @@ void main() {
     }
 
     vec3 ambient = ambient_count.rgb * albedo * ao;
-    vec3 color = ambient + Lo;
-
-    // Reinhard tonemap + gamma.
-    color = color / (color + vec3(1.0));
-    color = pow(color, vec3(1.0 / 2.2));
-    frag_color = vec4(color, 1.0);
+    // Output LINEAR HDR — tonemap + gamma happen later in the present pass, so
+    // transparent compositing (and future bloom) work in linear space.
+    frag_color = vec4(ambient + Lo, 1.0);
 }
 @end
 

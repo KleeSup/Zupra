@@ -111,6 +111,7 @@ pub const Material = struct {
     // --- surface/state flags ---
     alpha_mode: AlphaMode = .opaque_,
     double_sided: bool = false,
+    cull_override: ?sg.CullMode = null,
 
     /// Resolve a channel to its texture, falling back to the framework default
     /// so the shader always has a bound sampler.
@@ -127,6 +128,7 @@ pub const Material = struct {
     // --- pipeline state derived from the material ---
 
     pub fn cullMode(self: Material) sg.CullMode {
+        if (self.cull_override) |c| return c;
         return if (self.double_sided) .NONE else .BACK;
     }
 

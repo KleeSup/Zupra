@@ -148,10 +148,11 @@ pub const MeshRenderer = struct {
             .index_type = mesh.index_type,
             .pass = self.pass,
             .primitive = .TRIANGLES,
-            .cull = .NONE,
-            .blend = .none,
+            .cull = material.cullMode(),
+            .blend = material.blendMode(),
             .depth_test = true,
-            .depth_write = true,
+            .depth_write = material.alpha_mode != .blend,
+            .face_winding = .CCW,
         };
         const pip = self.cache.get(key) catch |err| {
             std.log.err("MeshRenderer: pipeline cache failed: {}", .{err});
