@@ -5,3 +5,4 @@ pub const mesh = @import("mesh.glsl.zig");
 pub const gbuffer = @import("gbuffer.glsl.zig");
 pub const deferred_lighting = @import("deferred_lighting.glsl.zig");
 pub const tonemap = @import("tonemap.glsl.zig");
+pub const sky = @import("sky.glsl.zig");

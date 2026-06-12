@@ -46,6 +46,7 @@ const GeometryRenderer = deferred_mod.GeometryRenderer;
 const DeferredRenderer = deferred_mod.DeferredRenderer;
 const Matrix = math.Matrix;
 const Color = zupra.Color;
+const Skybox = @import("skybox.zig").Skybox;
 
 pub const ShadingMode = enum { forward, deferred };
 
@@ -66,6 +67,7 @@ pub const SceneRenderer = struct {
 
     scene_color: Framebuffer,
     present: Present,
+    skybox: ?Skybox = null,
 
     // deferred-only
     gbuffer: GBuffer = undefined,
@@ -100,6 +102,7 @@ pub const SceneRenderer = struct {
             self.geo = GeometryRenderer.init(cache);
             self.lit = DeferredRenderer.init(cache);
         }
+        self.skybox = Skybox.init(cache);
         return self;
     }
 
@@ -111,6 +114,7 @@ pub const SceneRenderer = struct {
         }
         self.present.deinit();
         self.scene_color.deinit();
+        if (self.skybox) |*s| s.deinit();
     }
 
     fn makeSceneColor(mode: ShadingMode, w: u32, h: u32) Framebuffer {
@@ -205,7 +209,7 @@ pub const SceneRenderer = struct {
             },
         }
 
-        self.flushTransparent();
+        self.composite();
 
         // Present: tonemap scene-color (HDR) onto the swapchain.
         zupra.beginDrawingClear(self.clear_color);
@@ -213,32 +217,19 @@ pub const SceneRenderer = struct {
         zupra.endDrawing();
     }
 
-    fn flushTransparent(self: *SceneRenderer) void {
-        if (self.transparent.items.len == 0) return;
+    fn composite(self: *SceneRenderer) void {
+        const has_sky = self.skybox != null;
+        const has_transparent = self.transparent.items.len > 0;
+        if (!has_sky and !has_transparent) return;
 
-        // Back-to-front: farthest first (descending squared distance), so the
-        // "over" blend composites correctly.
-        std.mem.sort(TransparentEntry, self.transparent.items, {}, struct {
-            fn farther(_: void, a: TransparentEntry, b: TransparentEntry) bool {
-                return a.depth > b.depth;
-            }
-        }.farther);
-
-        // Depth to test against = the OPAQUE depth (so transparents are occluded
-        // by opaque geometry). Deferred: the G-buffer's depth. Forward: the
-        // scene-color's own depth (forward opaque wrote it).
         const opaque_depth = switch (self.mode) {
             .deferred => self.gbuffer.depth_view,
             .forward => self.scene_color.depth_view,
         };
 
-        // Pass: scene-color color (LOAD — preserve the lit opaque result) +
-        // opaque depth (LOAD — test against it, but depth-write is off so
-        // transparents don't occlude each other; sort order handles that).
         var att = sg.Attachments{};
         att.colors[0] = self.scene_color.color_view;
         att.depth_stencil = opaque_depth;
-
         var action = sg.PassAction{};
         action.colors[0] = .{ .load_action = .LOAD };
         action.depth = .{ .load_action = .LOAD };
@@ -247,14 +238,22 @@ pub const SceneRenderer = struct {
         sig.color_formats[0] = self.scene_color.color_format;
 
         zupra.beginDrawingPass(.{ .action = action, .attachments = att });
-        // The MeshRenderer's pipeline key is material-driven: blend materials get
-        // alpha blending + depth-write OFF automatically, so this same draw path
-        // renders transparents correctly.
-        self.forward.beginEx(self.camera, self.env, sig);
-        for (self.transparent.items) |e| {
-            self.forward.draw(e.mesh, e.model, e.material);
+
+        // Sky first (fills background; geometry occludes it via depth test).
+        if (self.skybox) |*sky| sky.render(self.camera, sig);
+
+        // Then sorted transparents over everything.
+        if (has_transparent) {
+            std.mem.sort(TransparentEntry, self.transparent.items, {}, struct {
+                fn farther(_: void, a: TransparentEntry, b: TransparentEntry) bool {
+                    return a.depth > b.depth;
+                }
+            }.farther);
+            self.forward.beginEx(self.camera, self.env, sig);
+            for (self.transparent.items) |e| self.forward.draw(e.mesh, e.model, e.material);
+            self.forward.end();
         }
-        self.forward.end();
+
         zupra.endDrawing();
     }
 };
