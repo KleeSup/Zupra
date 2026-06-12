@@ -1,9 +1,9 @@
 //------------------------------------------------------------------------------
 //  shaders/deferred_lighting.glsl
 //
-//  Deferred LIGHTING pass. A fullscreen triangle samples the four G-buffer
+//  Deferred lightning pass. A fullscreen triangle samples the four G-buffer
 //  targets and computes Cook-Torrance PBR per pixel. Directional lights are
-//  implemented; the light input is an ARRAY so point/spot are added by
+//  implemented; the light input is an array so point/spot are added by
 //  extending the loop, not restructuring.
 //
 //  G-buffer inputs (texture bindings 0..3):

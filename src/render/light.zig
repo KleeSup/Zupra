@@ -1,6 +1,5 @@
 const Vec3 = @import("../math.zig").Vec3;
 const Color = @import("../root.zig").Color;
-const Environment = @import("environment.zig").Environment;
 
 // =====================================================================
 // Lights

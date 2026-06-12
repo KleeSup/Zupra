@@ -135,7 +135,7 @@ pub const MeshRenderer = struct {
         std.debug.assert(!self.active);
         self.active = true;
         self.view_proj = camera.viewProjection();
-        self.lights = packLightParams(env.lights, env.ambient, camera.position);
+        self.lights = packLightParams(env.lights(), env.ambient, camera.position);
         self.pass = pass;
     }
 
