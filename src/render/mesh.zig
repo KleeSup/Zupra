@@ -44,6 +44,7 @@ const Environment = @import("environment.zig").Environment;
 const VsParams = shd.VsParams;
 const FsParams = extern struct {
     base_color: [4]f32,
+    materials: [4]f32,
     lights: LightParams,
 };
 
@@ -169,6 +170,7 @@ pub const MeshRenderer = struct {
         };
         var fs = FsParams{
             .base_color = .{ material.base_color.r, material.base_color.g, material.base_color.b, material.base_color.a },
+            .material = .{ material.metallic, material.roughness, material.occlusion_strength, 0 },
             .lights = self.lights,
         };
 

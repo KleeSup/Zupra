@@ -8,6 +8,60 @@ Zupra supports both forward as well as deferred rendering. The forward rendering
 
 **NOTE: The rendering for 3D is currently under heavily development.**
 
+### Planned
+
+*Camera*
+ - Perspective Camera
+ - Orthographic Camera (100%)
+ - Frustum Culling
+
+*Meshes*
+ - Static Meshes (100%)
+ - Dynamic Meshes
+ - Instancing (100%)
+
+*BRDF*
+ - Cook-Torrance 
+ - GGX
+ - Fresnel Schlick
+ - Geometry Smith
+
+*BRDF LUT*
+ - LUT Generation (100%)
+ - LUT Sampling
+
+*IBL*
+ - Cubemap Loader (50%)
+ - HDR Loader
+ - Skybox (100%)
+ - Irradiance Map
+ - Prefilter Map
+ - BRD Integration LUT
+ - Reflection Probes
+ - Box Projection
+
+*Shadows*
+ - Shadow Maps
+ - Cascaded Shadow Maps (CSM)
+ - Cubemap Shadows (Point Lights)
+ - Spot Shadow Maps (Spot Lights)
+ - PCF, PCSS, EVSM, Stable Cascades
+ 
+*Ambient Occlusion*
+ - SSAO (Kernel Generation, Blur)
+ - GTAO (Horizon Search Denoising)
+
+*Reflections*
+ - SSR (Ray Marching, Resolve)
+ - Reflection Probes (Probe Blending)
+
+*Anti-Aliasing*
+ - FXAA
+ - SMAA
+ - TAA
+ - TAAU
+
+
 ## Credits to the dependencies used
 - [Zig](https://ziglang.org/) (v0.16.0-dev.3142+5ccfeb926)
 - [sokol-zig](https://github.com/floooh/sokol-zig)

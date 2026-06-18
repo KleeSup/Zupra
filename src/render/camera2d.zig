@@ -8,7 +8,7 @@
 //!
 //! MATRIX LAYOUT NOTE: zmath stores matrices row-major (row-vector math,
 //! p' = p * M). GLSL uniforms are read column-major, so an uploaded zmath
-//! matrix is seen transposed by the shader — which is exactly what makes
+//! matrix is seen transposed by the shader, which is what makes
 //! `gl_Position = mvp * vec4(pos,0,1)` reproduce the row-vector transform.
 //! So: upload the result of viewProjection() directly, do NOT transpose, and
 //! compose as mul(view, proj) (view applied first).

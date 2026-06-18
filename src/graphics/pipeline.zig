@@ -135,8 +135,9 @@ pub const PipelineKey = struct {
     depth_test: bool = false,
     depth_write: bool = false,
     face_winding: sg.FaceWinding = .CCW,
+
     /// false = non-indexed draw (sokol index_type = .NONE). Debug lines/fills
-    /// and fullscreen post-fx triangles use this; indexed meshes/sprites = true.
+    /// and fullscreen post-fx triangles use this, but indexed meshes/sprites = true.
     indexed: bool = true,
 };
 

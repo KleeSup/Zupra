@@ -72,7 +72,7 @@ pub fn init() void {
     // Lighting: a warm sun + a colored point light.
     env = .{ .ambient = .{ .r = 0.03, .g = 0.03, .b = 0.04, .a = 1 } };
     env.addLight(Light.directional(.{ .x = -0.5, .y = -1.0, .z = -0.35 }, .{ .r = 1.0, .g = 0.96, .b = 0.9, .a = 1 }, 2.5));
-    env.addLight(Light.point(.{ .x = 2.5, .y = 2.5, .z = 2.0 }, .{ .r = 1.0, .g = 0.5, .b = 0.2, .a = 1 }, 35.0, 14.0));
+    env.addLight(Light.point(.{ .x = 2.5, .y = 2.5, .z = 2.0 }, .{ .r = 0.1, .g = 0.1, .b = 0.9, .a = 1 }, 35.0, 14.0));
 
     last_ticks = sokol.time.now();
 }
