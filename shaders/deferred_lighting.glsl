@@ -9,7 +9,7 @@
 //  light_params (uniform block 0): matches LightParams (light.zig).
 //------------------------------------------------------------------------------
 
-@include "pbr_lib.glsl.inc"
+@include pbr_lib.glsl.inc
 
 @vs vs
 in vec2 pos;

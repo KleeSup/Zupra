@@ -170,7 +170,7 @@ pub const MeshRenderer = struct {
         };
         var fs = FsParams{
             .base_color = .{ material.base_color.r, material.base_color.g, material.base_color.b, material.base_color.a },
-            .material = .{ material.metallic, material.roughness, material.occlusion_strength, 0 },
+            .materials = .{ material.metallic, material.roughness, material.occlusion_strength, 0 },
             .lights = self.lights,
         };
 

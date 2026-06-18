@@ -21,7 +21,7 @@
 //  base_color + material + LightParams (light.zig).
 //------------------------------------------------------------------------------
 
-@include "pbr_lib.glsl.inc"
+@include pbr_lib.glsl.inc
 
 @vs vs
 layout(binding=0) uniform vs_params {
