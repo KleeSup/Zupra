@@ -5,19 +5,16 @@
 //  (deferred_lighting.glsl) shaders so the two paths compute IDENTICAL lighting
 //  and cannot drift. (Not globbed by the build — it ends in .inc, not .glsl.)
 //
-//  Pulled in with `@include "pbr_lib.glsl.inc"`, then the blocks are pasted into
-//  the fragment shader with `@include_block`.
+//  Pulled in with `@include pbr_lib.glsl.inc` (no quotes; path is relative to the
+//  shaders/ dir), then the blocks are pasted with `@include_block`.
 //
 //  CONTRACT — before `@include_block pbr_lights` / `pbr_shade`, the including
-//  fragment shader must `#define MAX_LIGHTS` and declare a uniform block whose
-//  members include (the LightParams layout from light.zig):
-//      vec4 camera_pos;
-//      vec4 ambient_count;                 // rgb ambient, w = light count
-//      vec4 light_pos[MAX_LIGHTS];         // xyz pos, w = type (0 dir/1 point/2 spot)
-//      vec4 light_dir[MAX_LIGHTS];         // xyz travel dir, w = range
-//      vec4 light_color[MAX_LIGHTS];       // rgb, w = intensity
-//      vec4 light_spot[MAX_LIGHTS];        // x cos(inner), y cos(outer)
-//  Block name/binding don't matter — members are referenced by name.
+//  fragment shader must `#define MAX_LIGHTS`, declare a uniform block with the
+//  LightParams members (camera_pos, ambient_count, light_pos[], light_dir[],
+//  light_color[], light_spot[]), AND declare the IBL bindings used by pbr_shade:
+//      uniform textureCube irradiance_map;
+//      uniform sampler     smp_cube;
+//  Binding slots are the shader's choice; names must match.
 //------------------------------------------------------------------------------
 
 @block pbr_brdf
@@ -46,7 +43,6 @@ vec3 fresnelSchlick(float cosT, vec3 F0) {
 
 @block pbr_lights
 // Resolve light i: direction-to-light L and attenuation at world_pos.
-// References the light_* uniform arrays (see CONTRACT).
 void lightAt(int i, vec3 world_pos, out vec3 L, out float att) {
     L = vec3(0.0);
     att = 1.0;
@@ -73,11 +69,13 @@ void lightAt(int i, vec3 world_pos, out vec3 L, out float att) {
 @end
 
 @block pbr_shade
-// Full Cook-Torrance over the light array + ambient. The single source of truth
-// for surface shading; both paths resolve the surface, then call this.
+// Full Cook-Torrance over the light array + IBL diffuse ambient. The single
+// source of truth for surface shading; both paths resolve the surface, then
+// call this.
 //
-// (Diffuse IBL replaces the flat ambient term here in the next step — one edit,
-//  both paths.)
+// Ambient is now diffuse IBL: the irradiance map (the environment convolved over
+// the hemisphere) sampled along N. Metals get no diffuse (kD = 1 - metallic), so
+// they stay dark until SPECULAR IBL (prefilter + BRDF LUT) is added next.
 vec3 pbrShade(vec3 world_pos, vec3 N, vec3 V, vec3 albedo, float metallic, float roughness, float ao) {
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
     int count = int(ambient_count.w);
@@ -102,7 +100,11 @@ vec3 pbrShade(vec3 world_pos, vec3 N, vec3 V, vec3 albedo, float metallic, float
         Lo += (kD * albedo / PI + spec) * radiance * ndl;
     }
 
-    vec3 ambient = ambient_count.rgb * albedo * ao;
+    // Diffuse IBL: environment irradiance along the normal. (1 - metallic) since
+    // metals have no diffuse reflection.
+    vec3 irradiance = texture(samplerCube(irradiance_map, smp_cube), N).rgb;
+    vec3 ambient = (1.0 - metallic) * irradiance * albedo * ao;
+
     return ambient + Lo;
 }
 @end

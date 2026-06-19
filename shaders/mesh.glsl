@@ -49,6 +49,9 @@ void main() {
 @fs fs
 #define MAX_LIGHTS 16
 
+layout(binding=0) uniform textureCube irradiance_map;
+layout(binding=0) uniform sampler smp_cube;
+
 layout(binding=1) uniform fs_params {
     vec4 base_color;
     vec4 material; // x metallic, y roughness, z ao

@@ -47,6 +47,7 @@ const DeferredRenderer = deferred_mod.DeferredRenderer;
 const Matrix = math.Matrix;
 const Color = zupra.Color;
 const Skybox = @import("skybox.zig").Skybox;
+const Ibl = @import("ibl.zig").Ibl;
 
 pub const ShadingMode = enum { forward, deferred };
 
@@ -68,6 +69,8 @@ pub const SceneRenderer = struct {
     scene_color: Framebuffer,
     present: Present,
     skybox: ?Skybox = null,
+    ibl: ?Ibl = null,
+    ibl_baked: bool = false,
 
     // deferred-only
     gbuffer: GBuffer = undefined,
@@ -103,6 +106,7 @@ pub const SceneRenderer = struct {
             self.lit = DeferredRenderer.init(cache);
         }
         self.skybox = Skybox.init(cache);
+        self.ibl = Ibl.init(cache);
         return self;
     }
 
@@ -115,6 +119,7 @@ pub const SceneRenderer = struct {
         self.present.deinit();
         self.scene_color.deinit();
         if (self.skybox) |*s| s.deinit();
+        if (self.ibl) |*ibl| ibl.deinit();
     }
 
     fn makeSceneColor(mode: ShadingMode, w: u32, h: u32) Framebuffer {
@@ -149,6 +154,19 @@ pub const SceneRenderer = struct {
         self.camera.setViewport(@floatFromInt(w), @floatFromInt(h));
         self.env = env;
         self.transparent.clearRetainingCapacity();
+
+        if (!self.ibl_baked) {
+            if (self.ibl) |*ibl| {
+                if (self.skybox) |*sky| {
+                    ibl.bake(sky);
+                    self.ibl_baked = true;
+                }
+            }
+        }
+        if (self.ibl) |ibl| {
+            self.forward.setIbl(ibl.irradianceView(), ibl.cubeSampler());
+            if (self.mode == .deferred) self.lit.setIbl(ibl.irradianceView(), ibl.cubeSampler());
+        }
 
         switch (self.mode) {
             .deferred => {

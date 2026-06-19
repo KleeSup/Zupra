@@ -124,8 +124,16 @@ pub const MeshRenderer = struct {
     lights: LightParams = undefined,
     active: bool = false,
 
+    ibl_irradiance: sg.View = .{},
+    ibl_sampler: sg.Sampler = .{},
+
     pub fn init(cache: *PipelineCache) MeshRenderer {
         return .{ .cache = cache, .shader = sharedShader() };
+    }
+
+    pub fn setIbl(self: *MeshRenderer, irradiance: sg.View, sampler: sg.Sampler) void {
+        self.ibl_irradiance = irradiance;
+        self.ibl_sampler = sampler;
     }
 
     pub fn begin(self: *MeshRenderer, camera: Camera3D, env: Environment) void {
@@ -163,6 +171,8 @@ pub const MeshRenderer = struct {
         var bindings = sg.Bindings{};
         bindings.vertex_buffers[0] = mesh.vbuf;
         bindings.index_buffer = mesh.ibuf;
+        bindings.views[shd.VIEW_irradiance_map] = self.ibl_irradiance;
+        bindings.samplers[shd.SMP_smp_cube] = self.ibl_sampler;
 
         var vs = VsParams{
             .model = @bitCast(model),

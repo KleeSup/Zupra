@@ -28,7 +28,9 @@ layout(binding=0) uniform texture2D tex_albedo;
 layout(binding=1) uniform texture2D tex_normal;
 layout(binding=2) uniform texture2D tex_position;
 layout(binding=3) uniform texture2D tex_material;
+layout(binding=4) uniform textureCube irradiance_map;
 layout(binding=0) uniform sampler smp;
+layout(binding=1) uniform sampler smp_cube;
 
 layout(binding=0) uniform light_params {
     vec4 camera_pos;
