@@ -50,6 +50,8 @@ void main() {
 #define MAX_LIGHTS 16
 
 layout(binding=0) uniform textureCube irradiance_map;
+layout(binding=1) uniform textureCube prefilter_map;
+layout(binding=2) uniform texture2D brdf_lut;
 layout(binding=0) uniform sampler smp_cube;
 
 layout(binding=1) uniform fs_params {

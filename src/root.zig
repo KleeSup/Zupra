@@ -111,6 +111,10 @@ pub fn buildClearAction(clear_color: Color) sokol.gfx.PassAction {
 
 // --- Init ---
 
+pub fn getIo() std.Io {
+    return io;
+}
+
 pub const PoolSetup = struct {
     buffer_pool_size: i32 = 0,
     image_pool_size: i32 = 0,
@@ -138,6 +142,7 @@ pub const Config = struct {
 };
 var user_config: Config = undefined;
 var intern_deinit: *const fn () void = undefined;
+var io: std.Io = undefined;
 
 pub fn init(ctx: std.process.Init, config: Config) void {
     user_config = config;
@@ -154,6 +159,8 @@ pub fn init(ctx: std.process.Init, config: Config) void {
         .cleanup_cb = _deinit,
         .logger = .{ .func = sokol.log.func },
     };
+
+    io = ctx.io;
 
     zstbi.init(ctx.io, std.heap.c_allocator);
     zmesh.init(std.heap.c_allocator);

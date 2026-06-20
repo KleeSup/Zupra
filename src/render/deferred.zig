@@ -145,6 +145,8 @@ pub const DeferredRenderer = struct {
     fullscreen_vbuf: sg.Buffer,
 
     ibl_irradiance: sg.View = .{},
+    ibl_prefilter: sg.View = .{},
+    ibl_brdf_lut: sg.View = .{},
     ibl_sampler: sg.Sampler = .{},
 
     pub fn init(cache: *PipelineCache) DeferredRenderer {
@@ -180,8 +182,10 @@ pub const DeferredRenderer = struct {
         sg.destroyShader(self.shader);
     }
 
-    pub fn setIbl(self: *DeferredRenderer, irradiance: sg.View, sampler: sg.Sampler) void {
+    pub fn setIbl(self: *@This(), irradiance: sg.View, prefilter: sg.View, brdf_lut: sg.View, sampler: sg.Sampler) void {
         self.ibl_irradiance = irradiance;
+        self.ibl_prefilter = prefilter;
+        self.ibl_brdf_lut = brdf_lut;
         self.ibl_sampler = sampler;
     }
 
@@ -219,6 +223,8 @@ pub const DeferredRenderer = struct {
         bindings.views[shd_light.VIEW_tex_material] = gbuf.materialTexture().view;
         bindings.samplers[shd_light.SMP_smp] = self.sampler;
         bindings.views[shd_light.VIEW_irradiance_map] = self.ibl_irradiance;
+        bindings.views[shd_light.VIEW_prefilter_map] = self.ibl_prefilter;
+        bindings.views[shd_light.VIEW_brdf_lut] = self.ibl_brdf_lut;
         bindings.samplers[shd_light.SMP_smp_cube] = self.ibl_sampler;
 
         sg.applyPipeline(pip);

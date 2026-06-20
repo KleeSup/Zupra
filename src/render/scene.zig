@@ -106,7 +106,7 @@ pub const SceneRenderer = struct {
             self.lit = DeferredRenderer.init(cache);
         }
         self.skybox = Skybox.init(cache);
-        self.ibl = Ibl.init(cache);
+        self.ibl = Ibl.init(allocator, cache);
         return self;
     }
 
@@ -164,8 +164,9 @@ pub const SceneRenderer = struct {
             }
         }
         if (self.ibl) |ibl| {
-            self.forward.setIbl(ibl.irradianceView(), ibl.cubeSampler());
-            if (self.mode == .deferred) self.lit.setIbl(ibl.irradianceView(), ibl.cubeSampler());
+            self.forward.setIbl(ibl.irradianceView(), ibl.prefilterView(), ibl.brdfLutView(), ibl.cubeSampler());
+            if (self.mode == .deferred)
+                self.lit.setIbl(ibl.irradianceView(), ibl.prefilterView(), ibl.brdfLutView(), ibl.cubeSampler());
         }
 
         switch (self.mode) {

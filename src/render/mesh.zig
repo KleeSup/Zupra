@@ -125,14 +125,18 @@ pub const MeshRenderer = struct {
     active: bool = false,
 
     ibl_irradiance: sg.View = .{},
+    ibl_prefilter: sg.View = .{},
+    ibl_brdf_lut: sg.View = .{},
     ibl_sampler: sg.Sampler = .{},
 
     pub fn init(cache: *PipelineCache) MeshRenderer {
         return .{ .cache = cache, .shader = sharedShader() };
     }
 
-    pub fn setIbl(self: *MeshRenderer, irradiance: sg.View, sampler: sg.Sampler) void {
+    pub fn setIbl(self: *@This(), irradiance: sg.View, prefilter: sg.View, brdf_lut: sg.View, sampler: sg.Sampler) void {
         self.ibl_irradiance = irradiance;
+        self.ibl_prefilter = prefilter;
+        self.ibl_brdf_lut = brdf_lut;
         self.ibl_sampler = sampler;
     }
 
@@ -172,6 +176,8 @@ pub const MeshRenderer = struct {
         bindings.vertex_buffers[0] = mesh.vbuf;
         bindings.index_buffer = mesh.ibuf;
         bindings.views[shd.VIEW_irradiance_map] = self.ibl_irradiance;
+        bindings.views[shd.VIEW_prefilter_map] = self.ibl_prefilter;
+        bindings.views[shd.VIEW_brdf_lut] = self.ibl_brdf_lut;
         bindings.samplers[shd.SMP_smp_cube] = self.ibl_sampler;
 
         var vs = VsParams{
