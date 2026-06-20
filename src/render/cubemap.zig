@@ -95,20 +95,19 @@ pub const Cubemap = struct {
 /// fullscreen triangle into each face and reconstructs the sampling direction
 /// from the inverse of that face's matrix.
 ///
-/// NOTE: cube-face orientation (the up vectors) is the classic IBL gotcha and
-/// depends on the cubemap sampling convention. If baked maps look rotated or
-/// mirrored when sampled, these up/dir pairs are what to adjust.
+/// Up-vectors follow the D3D LEFT-HANDED cube convention, matching LH
+/// matrices (lookAtLh / perspectiveFovLh) and the D3D11 cube sampling order.
 pub fn faceViewProjections() [6]Matrix {
     const proj = zm.perspectiveFovLh(0.5 * std.math.pi, 1.0, 0.1, 10.0); // 90°
     const eye = zm.f32x4(0, 0, 0, 1);
 
     const faces = [6][2]Vec3{
-        .{ .{ .x = 1, .y = 0, .z = 0 }, .{ .x = 0, .y = -1, .z = 0 } }, // +X
-        .{ .{ .x = -1, .y = 0, .z = 0 }, .{ .x = 0, .y = -1, .z = 0 } }, // -X
-        .{ .{ .x = 0, .y = 1, .z = 0 }, .{ .x = 0, .y = 0, .z = 1 } }, // +Y
-        .{ .{ .x = 0, .y = -1, .z = 0 }, .{ .x = 0, .y = 0, .z = -1 } }, // -Y
-        .{ .{ .x = 0, .y = 0, .z = 1 }, .{ .x = 0, .y = -1, .z = 0 } }, // +Z
-        .{ .{ .x = 0, .y = 0, .z = -1 }, .{ .x = 0, .y = -1, .z = 0 } }, // -Z
+        .{ .{ .x = 1, .y = 0, .z = 0 }, .{ .x = 0, .y = 1, .z = 0 } }, // +X
+        .{ .{ .x = -1, .y = 0, .z = 0 }, .{ .x = 0, .y = 1, .z = 0 } }, // -X
+        .{ .{ .x = 0, .y = 1, .z = 0 }, .{ .x = 0, .y = 0, .z = -1 } }, // +Y
+        .{ .{ .x = 0, .y = -1, .z = 0 }, .{ .x = 0, .y = 0, .z = 1 } }, // -Y
+        .{ .{ .x = 0, .y = 0, .z = 1 }, .{ .x = 0, .y = 1, .z = 0 } }, // +Z
+        .{ .{ .x = 0, .y = 0, .z = -1 }, .{ .x = 0, .y = 1, .z = 0 } }, // -Z
     };
 
     var result: [6]Matrix = undefined;
