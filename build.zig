@@ -171,14 +171,25 @@ fn buildWeb(b: *Build, lib: *std.Build.Step.Compile, root: *Build.Module, dep_so
 }
 
 fn compileShaders(b: *Build, compile_step: *std.Build.Step.Compile, dep_sokol: *Build.Dependency, shader_dir_path: []const u8) !void {
-    // Shader compilation
     const dep_shdc = dep_sokol.builder.dependency("shdc", .{});
     const io = b.graph.io;
     const cwd = std.Io.Dir.cwd();
     var dir = try cwd.openDir(io, shader_dir_path, .{ .iterate = true });
     defer dir.close(io);
 
-    var iter = dir.iterate(); // in 0.16.0 iterate() may need io — see note below
+    // Pass 1: collect every .inc include (shared shader libs).
+    var includes: std.ArrayList([]const u8) = .empty;
+    {
+        var iter = dir.iterate();
+        while (try iter.next(io)) |entry| {
+            if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".inc")) {
+                try includes.append(b.allocator, b.pathJoin(&.{ shader_dir_path, entry.name }));
+            }
+        }
+    }
+
+    // Pass 2: compile each .glsl and register the includes on its Run step.
+    var iter = dir.iterate();
     while (try iter.next(io)) |entry| {
         if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".glsl")) {
             const input_path = b.pathJoin(&.{ shader_dir_path, entry.name });
@@ -196,6 +207,17 @@ fn compileShaders(b: *Build, compile_step: *std.Build.Step.Compile, dep_sokol: *
                     .glsl410 = true,
                 },
             });
+
+            // shdc_step is the UpdateSourceFiles copy step; the actual shdc Run
+            // step is its single dependency. Register each .inc as a file input
+            // on that Run step so its cache key includes the include contents.
+            for (shdc_step.dependencies.items) |dep_step| {
+                if (dep_step.cast(std.Build.Step.Run)) |run| {
+                    for (includes.items) |inc_path| {
+                        run.addFileInput(b.path(inc_path));
+                    }
+                }
+            }
 
             compile_step.step.dependOn(shdc_step);
         }

@@ -71,6 +71,17 @@ pub fn deinitDefaults() void {
 
 // --- material ---
 
+/// How a surface is shaded. Lets you opt out of PBR for stylized/low-poly
+/// work without losing access to it elsewhere.
+///   .pbr     — full Cook-Torrance + IBL (default; realistic).
+///   .lambert — diffuse N·L + flat ambient; no specular/metallic/IBL (simple lit).
+///   .unlit   — flat albedo, no lighting (UI-in-world, stylized, debug).
+pub const ShadingModel = enum(u8) {
+    pbr,
+    lambert,
+    unlit,
+};
+
 pub const AlphaMode = enum(u8) {
     /// Fully opaque; alpha ignored.
     opaque_,
@@ -112,6 +123,8 @@ pub const Material = struct {
     alpha_mode: AlphaMode = .opaque_,
     double_sided: bool = false,
     cull_override: ?sg.CullMode = null,
+
+    shading: ShadingModel = .pbr,
 
     /// Resolve a channel to its texture, falling back to the framework default
     /// so the shader always has a bound sampler.

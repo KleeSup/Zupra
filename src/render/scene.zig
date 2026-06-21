@@ -58,6 +58,12 @@ const TransparentEntry = struct {
     depth: f32, // squared distance to camera, for back-to-front sort
 };
 
+const ForwardEntry = struct {
+    mesh: Mesh,
+    model: Matrix,
+    material: Material,
+};
+
 pub const SceneRenderer = struct {
     mode: ShadingMode,
     cache: *PipelineCache,
@@ -79,6 +85,7 @@ pub const SceneRenderer = struct {
 
     // forward-only
     forward: MeshRenderer = undefined,
+    forward_opaque: std.ArrayListUnmanaged(ForwardEntry) = .empty,
 
     // transparent draw queue (both modes); flushed sorted in the NEXT step
     transparent: std.ArrayListUnmanaged(TransparentEntry) = .empty,
@@ -112,6 +119,7 @@ pub const SceneRenderer = struct {
 
     pub fn deinit(self: *SceneRenderer) void {
         self.transparent.deinit(self.allocator);
+        self.forward_opaque.deinit(self.allocator);
         if (self.mode == .deferred) {
             self.lit.deinit();
             self.gbuffer.deinit();
@@ -154,6 +162,7 @@ pub const SceneRenderer = struct {
         self.camera.setViewport(@floatFromInt(w), @floatFromInt(h));
         self.env = env;
         self.transparent.clearRetainingCapacity();
+        self.forward_opaque.clearRetainingCapacity();
 
         if (!self.ibl_baked) {
             if (self.ibl) |*ibl| {
@@ -206,21 +215,37 @@ pub const SceneRenderer = struct {
 
     fn drawOpaque(self: *SceneRenderer, mesh: Mesh, model: Matrix, material: Material) void {
         switch (self.mode) {
-            .deferred => self.geo.drawMesh(mesh, model, material),
+            .deferred => {
+                if (material.shading == .pbr) {
+                    self.geo.drawMesh(mesh, model, material); // G-buffer (PBR lighting)
+                } else {
+                    // Forward-shaded after the lighting pass (respects shading model).
+                    self.forward_opaque.append(self.allocator, .{
+                        .mesh = mesh,
+                        .model = model,
+                        .material = material,
+                    }) catch {};
+                }
+            },
             .forward => self.forward.draw(mesh, model, material),
         }
     }
 
     pub fn end(self: *SceneRenderer) void {
-        // Finish the opaque path, leaving the lit result in scene-color (HDR).
         switch (self.mode) {
             .deferred => {
                 self.geo.end();
                 zupra.endDrawing(); // end G-buffer pass
 
+                // PBR opaque -> scene-color via the lighting pass.
                 zupra.beginDrawingFramebufferClear(self.scene_color, self.clear_color);
                 self.lit.render(self.gbuffer, self.camera, self.env, self.scene_color.passSignature());
                 zupra.endDrawing(); // end lighting pass
+
+                // Non-PBR opaque (unlit/lambert) -> scene-color, forward-shaded,
+                // depth-tested AND written against the G-buffer depth so they merge
+                // correctly with the PBR geometry.
+                self.flushForwardOpaque();
             },
             .forward => {
                 self.forward.end();
@@ -273,6 +298,29 @@ pub const SceneRenderer = struct {
             self.forward.end();
         }
 
+        zupra.endDrawing();
+    }
+
+    fn flushForwardOpaque(self: *SceneRenderer) void {
+        if (self.forward_opaque.items.len == 0) return;
+
+        var att = sg.Attachments{};
+        att.colors[0] = self.scene_color.color_view;
+        att.depth_stencil = self.gbuffer.depth_view;
+
+        var action = sg.PassAction{};
+        action.colors[0] = .{ .load_action = .LOAD };
+        action.depth = .{ .load_action = .LOAD };
+
+        var sig = PassSignature{ .color_count = 1, .depth_format = .DEPTH, .sample_count = 1 };
+        sig.color_formats[0] = self.scene_color.color_format;
+
+        zupra.beginDrawingPass(.{ .action = action, .attachments = att });
+        self.forward.beginEx(self.camera, self.env, sig);
+        for (self.forward_opaque.items) |e| {
+            self.forward.draw(e.mesh, e.model, e.material);
+        }
+        self.forward.end();
         zupra.endDrawing();
     }
 };

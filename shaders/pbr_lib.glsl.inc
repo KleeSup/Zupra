@@ -117,7 +117,7 @@ vec3 pbrShade(vec3 world_pos, vec3 N, vec3 V, vec3 albedo, float metallic, float
     const float MAX_REFLECTION_LOD = 4.0;
     vec3 R = reflect(-V, N);
     vec3 prefiltered = textureLod(samplerCube(prefilter_map, smp_cube), R, roughness * MAX_REFLECTION_LOD).rgb;
-    vec2 brdf = texture(sampler2D(brdf_lut, smp_cube), vec2(ndv, roughness)).rg;
+    vec2 brdf = texture(sampler2D(brdf_lut, smp_cube), vec2(ndv, 1.0 - roughness)).rg;
     vec3 specular_ibl = prefiltered * (F_amb * brdf.x + brdf.y);
 
     vec3 ambient = (kD * diffuse_ibl + specular_ibl) * ao;

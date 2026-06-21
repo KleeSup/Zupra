@@ -8,3 +8,5 @@ pub const tonemap = @import("tonemap.glsl.zig");
 pub const sky = @import("sky.glsl.zig");
 pub const irradiance = @import("irradiance.glsl.zig");
 pub const prefilter = @import("prefilter.glsl.zig");
+pub const lambert = @import("lambert.glsl.zig");
+pub const unlit = @import("unlit.glsl.zig");

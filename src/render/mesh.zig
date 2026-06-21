@@ -24,6 +24,8 @@ const math = @import("../math.zig");
 const Camera3D = @import("camera3d.zig").Camera3D;
 
 const shd = @import("shaders").mesh;
+const shd_unlit = @import("shaders").unlit;
+const shd_lambert = @import("shaders").lambert;
 
 const Vertex3D = gfx.Vertex3D;
 const IndexData = gfx.IndexData;
@@ -40,13 +42,58 @@ const Light = @import("light.zig").Light;
 const LightParams = @import("light.zig").LightParams;
 const packLightParams = @import("light.zig").packLightParams;
 const Environment = @import("environment.zig").Environment;
+const ShadingModel = @import("material.zig").ShadingModel;
 
 const VsParams = shd.VsParams;
-const FsParams = extern struct {
+const PbrFs = extern struct {
     base_color: [4]f32,
-    materials: [4]f32,
+    materials: [4]f32, // metallic, roughness, ao, unused
     lights: LightParams,
 };
+const LambertFs = extern struct {
+    base_color: [4]f32,
+    lights: LightParams, // camera_pos + ambient_count + light arrays (lambert ignores camera_pos)
+};
+const UnlitFs = extern struct {
+    base_color: [4]f32,
+};
+
+const ShaderSet = struct {
+    pbr: ShaderProgram,
+    lambert: ShaderProgram,
+    unlit: ShaderProgram,
+};
+
+var shared_set: ?ShaderSet = null;
+
+pub fn sharedShaders() ShaderSet {
+    if (shared_set == null) {
+        shared_set = .{
+            .pbr = ShaderProgram.init(shd.meshShaderDesc, .{
+                .layout = .mesh,
+                .slots = .{ .vs_params = shd.UB_vs_params, .fs_params = shd.UB_fs_params },
+            }),
+            .lambert = ShaderProgram.init(shd_lambert.lambertShaderDesc, .{
+                .layout = .mesh,
+                .slots = .{ .vs_params = shd_lambert.UB_vs_params, .fs_params = shd_lambert.UB_fs_params },
+            }),
+            .unlit = ShaderProgram.init(shd_unlit.unlitShaderDesc, .{
+                .layout = .mesh,
+                .slots = .{ .vs_params = shd_unlit.UB_vs_params, .fs_params = shd_unlit.UB_fs_params },
+            }),
+        };
+    }
+    return shared_set.?;
+}
+
+pub fn deinitShared() void {
+    if (shared_set) |*s| {
+        s.pbr.deinit();
+        s.lambert.deinit();
+        s.unlit.deinit();
+        shared_set = null;
+    }
+}
 
 // --- mesh resource ---
 
@@ -91,35 +138,13 @@ pub const Mesh = struct {
     }
 };
 
-// --- shared mesh shader ---
-
-var shared_shader: ?ShaderProgram = null;
-
-pub fn sharedShader() ShaderProgram {
-    if (shared_shader == null) {
-        shared_shader = ShaderProgram.init(shd.meshShaderDesc, .{
-            .layout = .mesh,
-            .slots = .{ .vs_params = shd.UB_vs_params, .fs_params = shd.UB_fs_params },
-        });
-    }
-    return shared_shader.?;
-}
-
-pub fn deinitShared() void {
-    if (shared_shader) |*s| {
-        s.deinit();
-        shared_shader = null;
-    }
-}
-
 // --- draw path ---
 
 pub const MeshRenderer = struct {
     cache: *PipelineCache,
-    shader: ShaderProgram,
+    shaders: ShaderSet,
     pass: PassSignature = .{},
 
-    // per-frame state captured at begin()
     view_proj: Matrix = undefined,
     lights: LightParams = undefined,
     active: bool = false,
@@ -130,10 +155,10 @@ pub const MeshRenderer = struct {
     ibl_sampler: sg.Sampler = .{},
 
     pub fn init(cache: *PipelineCache) MeshRenderer {
-        return .{ .cache = cache, .shader = sharedShader() };
+        return .{ .cache = cache, .shaders = sharedShaders() };
     }
 
-    pub fn setIbl(self: *@This(), irradiance: sg.View, prefilter: sg.View, brdf_lut: sg.View, sampler: sg.Sampler) void {
+    pub fn setIbl(self: *MeshRenderer, irradiance: sg.View, prefilter: sg.View, brdf_lut: sg.View, sampler: sg.Sampler) void {
         self.ibl_irradiance = irradiance;
         self.ibl_prefilter = prefilter;
         self.ibl_brdf_lut = brdf_lut;
@@ -155,8 +180,15 @@ pub const MeshRenderer = struct {
     pub fn draw(self: *MeshRenderer, mesh: Mesh, model: Matrix, material: Material) void {
         std.debug.assert(self.active);
 
+        // Pick the shader for this material's shading model.
+        const shader: ShaderProgram = switch (material.shading) {
+            .pbr => self.shaders.pbr,
+            .lambert => self.shaders.lambert,
+            .unlit => self.shaders.unlit,
+        };
+
         const key = PipelineKey{
-            .shader = self.shader.handle,
+            .shader = shader.handle,
             .layout = .mesh,
             .index_type = mesh.index_type,
             .pass = self.pass,
@@ -175,25 +207,48 @@ pub const MeshRenderer = struct {
         var bindings = sg.Bindings{};
         bindings.vertex_buffers[0] = mesh.vbuf;
         bindings.index_buffer = mesh.ibuf;
-        bindings.views[shd.VIEW_irradiance_map] = self.ibl_irradiance;
-        bindings.views[shd.VIEW_prefilter_map] = self.ibl_prefilter;
-        bindings.views[shd.VIEW_brdf_lut] = self.ibl_brdf_lut;
-        bindings.samplers[shd.SMP_smp_cube] = self.ibl_sampler;
+
+        // IBL bindings only exist on the PBR shader.
+        if (material.shading == .pbr) {
+            bindings.views[shd.VIEW_irradiance_map] = self.ibl_irradiance;
+            bindings.views[shd.VIEW_prefilter_map] = self.ibl_prefilter;
+            bindings.views[shd.VIEW_brdf_lut] = self.ibl_brdf_lut;
+            bindings.samplers[shd.SMP_smp_cube] = self.ibl_sampler;
+        }
 
         var vs = VsParams{
             .model = @bitCast(model),
             .view_proj = @bitCast(self.view_proj),
         };
-        var fs = FsParams{
-            .base_color = .{ material.base_color.r, material.base_color.g, material.base_color.b, material.base_color.a },
-            .materials = .{ material.metallic, material.roughness, material.occlusion_strength, 0 },
-            .lights = self.lights,
-        };
+        const c = material.base_color;
 
         sg.applyPipeline(pip);
         sg.applyBindings(bindings);
-        sg.applyUniforms(self.shader.slots.vs_params, sg.asRange(&vs));
-        sg.applyUniforms(self.shader.slots.fs_params.?, sg.asRange(&fs));
+        sg.applyUniforms(shader.slots.vs_params, sg.asRange(&vs));
+
+        // Upload the fs uniforms matching the chosen shader.
+        switch (material.shading) {
+            .pbr => {
+                var fs = PbrFs{
+                    .base_color = .{ c.r, c.g, c.b, c.a },
+                    .materials = .{ material.metallic, material.roughness, material.occlusion_strength, 0 },
+                    .lights = self.lights,
+                };
+                sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&fs));
+            },
+            .lambert => {
+                var fs = LambertFs{
+                    .base_color = .{ c.r, c.g, c.b, c.a },
+                    .lights = self.lights,
+                };
+                sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&fs));
+            },
+            .unlit => {
+                var fs = UnlitFs{ .base_color = .{ c.r, c.g, c.b, c.a } };
+                sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&fs));
+            },
+        }
+
         sg.draw(0, mesh.index_count, 1);
     }
 
