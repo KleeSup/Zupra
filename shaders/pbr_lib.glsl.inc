@@ -81,6 +81,7 @@ void lightAt(int i, vec3 world_pos, out vec3 L, out float att) {
 //
 // MAX_REFLECTION_LOD must match (prefilter_mips - 1) in ibl.zig.
 vec3 pbrShade(vec3 world_pos, vec3 N, vec3 V, vec3 albedo, float metallic, float roughness, float ao) {
+
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
     float ndv = max(dot(N, V), 0.0);
 
@@ -117,9 +118,8 @@ vec3 pbrShade(vec3 world_pos, vec3 N, vec3 V, vec3 albedo, float metallic, float
     const float MAX_REFLECTION_LOD = 4.0;
     vec3 R = reflect(-V, N);
     vec3 prefiltered = textureLod(samplerCube(prefilter_map, smp_cube), R, roughness * MAX_REFLECTION_LOD).rgb;
-    vec2 brdf = texture(sampler2D(brdf_lut, smp_cube), vec2(ndv, 1.0 - roughness)).rg;
+    vec2 brdf = texture(sampler2D(brdf_lut, smp_cube), vec2(ndv, roughness)).rg;
     vec3 specular_ibl = prefiltered * (F_amb * brdf.x + brdf.y);
-
     vec3 ambient = (kD * diffuse_ibl + specular_ibl) * ao;
     return ambient + Lo;
 }
