@@ -72,11 +72,27 @@ pub const GeometryRenderer = struct {
     cache: *PipelineCache,
     shader: ShaderProgram,
     pass: PassSignature = .{},
+    material_sampler: sg.Sampler,
     view_proj: Matrix = undefined,
     active: bool = false,
 
     pub fn init(cache: *PipelineCache) GeometryRenderer {
-        return .{ .cache = cache, .shader = geoSharedShader() };
+        return .{
+            .cache = cache,
+            .shader = geoSharedShader(),
+            .material_sampler = sg.makeSampler(.{
+                .min_filter = .LINEAR,
+                .mag_filter = .LINEAR,
+                .mipmap_filter = .LINEAR,
+                .wrap_u = .REPEAT,
+                .wrap_v = .REPEAT,
+            }),
+        };
+    }
+
+    pub fn deinit(self: *GeometryRenderer) void {
+        sg.destroySampler(self.material_sampler);
+        self.active = false;
     }
 
     pub fn begin(self: *GeometryRenderer, camera: Camera3D, pass: PassSignature) void {
@@ -114,8 +130,11 @@ pub const GeometryRenderer = struct {
         const c = material.base_color;
         var fs = GeoFs{
             .base_color = .{ c.r, c.g, c.b, c.a },
-            .mat_params = .{ material.metallic, material.roughness, material.occlusion_strength, 0 },
+            .mat_params = .{ material.metallic, material.roughness, material.occlusion_strength, material.normal_scale },
         };
+
+        bindings.views[shd_geo.VIEW_normal_map] = material.map(.normal).view;
+        bindings.samplers[shd_geo.SMP_smp_material] = self.material_sampler;
 
         sg.applyPipeline(pip);
         sg.applyBindings(bindings);

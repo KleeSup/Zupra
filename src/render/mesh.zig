@@ -144,6 +144,7 @@ pub const MeshRenderer = struct {
     cache: *PipelineCache,
     shaders: ShaderSet,
     pass: PassSignature = .{},
+    material_sampler: sg.Sampler,
 
     view_proj: Matrix = undefined,
     lights: LightParams = undefined,
@@ -155,7 +156,21 @@ pub const MeshRenderer = struct {
     ibl_sampler: sg.Sampler = .{},
 
     pub fn init(cache: *PipelineCache) MeshRenderer {
-        return .{ .cache = cache, .shaders = sharedShaders() };
+        return .{
+            .cache = cache,
+            .shaders = sharedShaders(),
+            .material_sampler = sg.makeSampler(.{
+                .min_filter = .LINEAR,
+                .mag_filter = .LINEAR,
+                .mipmap_filter = .LINEAR,
+                .wrap_u = .REPEAT,
+                .wrap_v = .REPEAT,
+            }),
+        };
+    }
+
+    pub fn deinit(self: *MeshRenderer) void {
+        sg.destroySampler(self.material_sampler);
     }
 
     pub fn setIbl(self: *MeshRenderer, irradiance: sg.View, prefilter: sg.View, brdf_lut: sg.View, sampler: sg.Sampler) void {
@@ -214,6 +229,8 @@ pub const MeshRenderer = struct {
             bindings.views[shd.VIEW_prefilter_map] = self.ibl_prefilter;
             bindings.views[shd.VIEW_brdf_lut] = self.ibl_brdf_lut;
             bindings.samplers[shd.SMP_smp_cube] = self.ibl_sampler;
+            bindings.views[shd.VIEW_normal_map] = material.map(.normal).view;
+            bindings.samplers[shd.SMP_smp_material] = self.material_sampler;
         }
 
         var vs = VsParams{
@@ -231,7 +248,7 @@ pub const MeshRenderer = struct {
             .pbr => {
                 var fs = PbrFs{
                     .base_color = .{ c.r, c.g, c.b, c.a },
-                    .materials = .{ material.metallic, material.roughness, material.occlusion_strength, 0 },
+                    .materials = .{ material.metallic, material.roughness, material.occlusion_strength, material.normal_scale },
                     .lights = self.lights,
                 };
                 sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&fs));

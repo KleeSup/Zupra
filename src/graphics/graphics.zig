@@ -21,11 +21,11 @@ pub const Vertex2D = extern struct {
 };
 
 /// Standard 3D mesh vertex.
-/// (Tangent can be appended later as slot 3)
 pub const Vertex3D = extern struct {
     pos: [3]f32,
     normal: [3]f32,
     uv: [2]f32,
+    tangent: [4]f32 = .{ 1, 0, 0, 1 },
 };
 
 /// Debug-draw vertex (lines / wire shapes), 2D and 3D.

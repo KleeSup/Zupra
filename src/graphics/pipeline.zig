@@ -33,6 +33,7 @@ pub const VertexLayout = enum {
                 l.attrs[0] = .{ .offset = @offsetOf(Vertex3D, "pos"), .format = .FLOAT3 };
                 l.attrs[1] = .{ .offset = @offsetOf(Vertex3D, "normal"), .format = .FLOAT3 };
                 l.attrs[2] = .{ .offset = @offsetOf(Vertex3D, "uv"), .format = .FLOAT2 };
+                l.attrs[3] = .{ .offset = @offsetOf(Vertex3D, "tangent"), .format = .FLOAT4 };
             },
             .debug => {
                 l.buffers[0].stride = @sizeOf(VertexDebug);
@@ -43,7 +44,6 @@ pub const VertexLayout = enum {
                 l.buffers[0].stride = @sizeOf(Vertex2D);
                 l.attrs[0] = .{ .offset = @offsetOf(Vertex2D, "pos"), .format = .FLOAT2 };
                 l.attrs[1] = .{ .offset = @offsetOf(Vertex2D, "uv"), .format = .FLOAT2 };
-                // no attrs[2]: matches the 2-input fullscreen shaders
             },
         }
         return l;

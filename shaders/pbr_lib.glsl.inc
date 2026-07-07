@@ -81,7 +81,6 @@ void lightAt(int i, vec3 world_pos, out vec3 L, out float att) {
 //
 // MAX_REFLECTION_LOD must match (prefilter_mips - 1) in ibl.zig.
 vec3 pbrShade(vec3 world_pos, vec3 N, vec3 V, vec3 albedo, float metallic, float roughness, float ao) {
-
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
     float ndv = max(dot(N, V), 0.0);
 
@@ -120,6 +119,7 @@ vec3 pbrShade(vec3 world_pos, vec3 N, vec3 V, vec3 albedo, float metallic, float
     vec3 prefiltered = textureLod(samplerCube(prefilter_map, smp_cube), R, roughness * MAX_REFLECTION_LOD).rgb;
     vec2 brdf = texture(sampler2D(brdf_lut, smp_cube), vec2(ndv, roughness)).rg;
     vec3 specular_ibl = prefiltered * (F_amb * brdf.x + brdf.y);
+
     vec3 ambient = (kD * diffuse_ibl + specular_ibl) * ao;
     return ambient + Lo;
 }
@@ -142,5 +142,19 @@ float radicalInverseVdC(uint bits) {
 }
 vec2 hammersley(uint i, uint n) {
     return vec2(float(i) / float(n), radicalInverseVdC(i));
+}
+@end
+
+@block pbr_normal_map
+// Perturb the geometric world normal N by a tangent-space normal map. Needs the
+// world tangent Tin, handedness w, uv, normal_scale, and the bindings
+// `normal_map` (texture2D) + `smp_material` (sampler) declared in the shader.
+// If no normal map is bound the default is a flat (0.5,0.5,1) texel -> returns N.
+vec3 applyNormalMap(vec3 N, vec3 Tin, float w, vec2 uv, float normal_scale) {
+    vec3 T = normalize(Tin - N * dot(N, Tin)); // Gram-Schmidt orthonormalize
+    vec3 B = cross(N, T) * w;
+    vec3 nm = texture(sampler2D(normal_map, smp_material), uv).xyz * 2.0 - 1.0;
+    nm.xy *= normal_scale;
+    return normalize(mat3(T, B, N) * nm);
 }
 @end

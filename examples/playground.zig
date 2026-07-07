@@ -40,11 +40,15 @@ pub fn init() void {
 
     cam = zupra.render.Camera3D.init(16.0 / 9.0);
 
+    const bricks = zupra.graphics.texture.Texture.initBuffer(@embedFile("assets/bricks/Bricks097_1K-JPG_Color.jpg")) catch unreachable;
+
     // Floor: large rough dielectric plane.
     floor_model = Model.fromMesh(gpa, MeshBuilder.plane(24, 24), .{
-        .base_color = .{ .r = 0.5, .g = 0.5, .b = 0.55, .a = 1 },
+        .base_color = .{ .r = 1, .g = 1, .b = 1, .a = 1 },
         .metallic = 0.0,
-        .roughness = 0.9,
+        .roughness = 0.0,
+        .base_color_map = bricks,
+        .shading = .lambert,
     }) catch unreachable;
 
     // Polished metal sphere.
@@ -59,6 +63,8 @@ pub fn init() void {
         .base_color = .{ .r = 0.85, .g = 0.25, .b = 0.2, .a = 1 },
         .metallic = 0.0,
         .roughness = 0.65,
+
+        .shading = .pbr,
     }) catch unreachable;
 
     // Transparent sphere (routes to the sorted forward transparent pass).
@@ -70,12 +76,8 @@ pub fn init() void {
     }) catch unreachable;
 
     // Lighting: a warm sun + a colored point light.
-    //env = .{ .ambient = .{ .r = 0.03, .g = 0.03, .b = 0.04, .a = 1 } };
-    scene.skybox.?.sky_top = .{ .r = 0.1, .g = 0.2, .b = 0.5, .a = 1 };
-    scene.skybox.?.sky_horizon = .{ .r = 0.6, .g = 0.6, .b = 0.55, .a = 1 };
-    scene.skybox.?.sun_intensity = 2;
-    //env.addLight(Light.directional(.{ .x = -0.5, .y = -1.0, .z = -0.35 }, .{ .r = 1.0, .g = 0.96, .b = 0.9, .a = 1 }, 2.5));
-    //env.addLight(Light.point(.{ .x = 2.5, .y = 2.5, .z = 2.0 }, .{ .r = 0.1, .g = 0.1, .b = 0.9, .a = 1 }, 35.0, 14.0));
+    env = .{ .ambient = .{ .r = 0.03, .g = 0.03, .b = 0.04, .a = 1 } };
+    env.addLight(Light.directional(.{ .x = -0.5, .y = -1.0, .z = -0.35 }, .{ .r = 1.0, .g = 0.96, .b = 0.9, .a = 1 }, 2.5));
 
     last_ticks = sokol.time.now();
 }
