@@ -26,6 +26,7 @@ pub const Vertex3D = extern struct {
     normal: [3]f32,
     uv: [2]f32,
     tangent: [4]f32 = .{ 1, 0, 0, 1 },
+    uv1: [2]f32 = .{ 0, 0 }, // glTF TEXCOORD_1 (baked AO, lightmaps, detail)
 };
 
 /// Debug-draw vertex (lines / wire shapes), 2D and 3D.

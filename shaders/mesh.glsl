@@ -1,15 +1,17 @@
 //------------------------------------------------------------------------------
 //  shaders/mesh.glsl
 //
-//  FORWARD lit mesh shader. Uses the shared PBR (pbr_lib.glsl.inc) so it matches
-//  the deferred path, and now applies a tangent-space normal map before lighting
-//  (same perturbation the G-buffer bakes in the deferred path).
+//  FORWARD lit PBR mesh shader. Shares pbr_lib.glsl.inc with the deferred path
+//  so shading can't diverge. Supports the full glTF material: all five maps,
+//  TWO UV SETS (TEXCOORD_0/1) and KHR_texture_transform per map.
 //
-//    vs_params (binding 0): model, view_proj
-//    fs_params (binding 1): base_color, material(x metallic,y roughness,z ao,
-//                           w normal_scale), then LightParams (light.zig)
-//    textures: irradiance_map(cube 0), prefilter_map(cube 1), brdf_lut(2d 2),
-//              normal_map(2d 3)
+//    vs_params (binding 0): model, view_proj, uv_scale
+//    fs_params (binding 1): base_color, material(x metallic, y roughness,
+//                           z occlusion_strength, w normal_scale), emissive,
+//                           then LightParams (light.zig)
+//    uv_params (binding 2): uv_m[5], uv_aux[5] — per-map transform + UV set
+//    textures: irradiance(cube 0), prefilter(cube 1), brdf_lut(2), normal(3),
+//              base_color(4), emissive(5), metallic_roughness(6), occlusion(7)
 //    samplers: smp_cube(0), smp_material(1)
 //------------------------------------------------------------------------------
 
@@ -19,19 +21,21 @@
 layout(binding=0) uniform vs_params {
     mat4 model;
     mat4 view_proj;
-    vec4 uv_scale; // xy = texture tiling, zw unused
+    vec4 uv_scale; // xy = tiling applied to BOTH uv sets, zw unused
 };
 
 in vec3 pos;
 in vec3 normal;
 in vec2 uv;
 in vec4 tangent;
+in vec2 uv1;
 
 out vec3 v_world_pos;
 out vec3 v_world_normal;
 out vec3 v_world_tangent;
 out float v_tangent_w;
 out vec2 v_uv;
+out vec2 v_uv1;
 
 void main() {
     vec4 world = model * vec4(pos, 1.0);
@@ -41,6 +45,7 @@ void main() {
     v_world_tangent = mat3(model) * tangent.xyz;
     v_tangent_w = tangent.w;
     v_uv = uv * uv_scale.xy;
+    v_uv1 = uv1 * uv_scale.xy;
 }
 @end
 
@@ -60,7 +65,7 @@ layout(binding=1) uniform sampler smp_material;
 
 layout(binding=1) uniform fs_params {
     vec4 base_color;
-    vec4 material; // x metallic, y roughness, z ao, w normal_scale
+    vec4 material; // x metallic, y roughness, z occlusion_strength, w normal_scale
     vec4 emissive; // rgb factor, w strength
     vec4 camera_pos;
     vec4 ambient_count;
@@ -70,38 +75,51 @@ layout(binding=1) uniform fs_params {
     vec4 light_spot[MAX_LIGHTS];
 };
 
+layout(binding=2) uniform uv_params {
+    vec4 uv_m[5];   // packed 2x2 (rot*scale) per map
+    vec4 uv_aux[5]; // offset.xy, uv_set, unused
+};
+
 in vec3 v_world_pos;
 in vec3 v_world_normal;
 in vec3 v_world_tangent;
 in float v_tangent_w;
 in vec2 v_uv;
+in vec2 v_uv1;
 
 out vec4 frag_color;
 
 @include_block pbr_brdf
 @include_block pbr_lights
+@include_block uv_transform
 @include_block pbr_normal_map
 @include_block pbr_shade
 
 void main() {
+    // Resolve each map's UV: pick its set, apply its KHR transform.
+    vec2 uv_bc = mapUv(UV_BASE_COLOR, v_uv, v_uv1);
+    vec2 uv_n  = mapUv(UV_NORMAL, v_uv, v_uv1);
+    vec2 uv_mr = mapUv(UV_METALLIC_ROUGHNESS, v_uv, v_uv1);
+    vec2 uv_ao = mapUv(UV_OCCLUSION, v_uv, v_uv1);
+    vec2 uv_em = mapUv(UV_EMISSIVE, v_uv, v_uv1);
+
     vec3 N = normalize(v_world_normal);
-    N = applyNormalMap(N, v_world_tangent, v_tangent_w, v_uv, material.w);
+    N = applyNormalMap(N, v_world_tangent, v_tangent_w, uv_n, material.w);
     vec3 V = normalize(camera_pos.xyz - v_world_pos);
 
-    // Albedo: linear factor * sRGB-decoded texture (default white -> factor).
-    vec3 tex = texture(sampler2D(base_color_map, smp_material), v_uv).rgb;
+    // Albedo: linear factor * sRGB-decoded texture (white default -> factor).
+    vec3 tex = texture(sampler2D(base_color_map, smp_material), uv_bc).rgb;
     vec3 albedo = base_color.rgb * pow(max(tex, vec3(0.0)), vec3(2.2));
 
-    // Metallic-roughness (glTF: G=roughness, B=metallic) and occlusion (R),
-    // linear (no sRGB). Factors in material.xyz; defaults are white -> factor.
-    vec3 mr = texture(sampler2D(metallic_roughness_map, smp_material), v_uv).rgb;
+    // Metallic-roughness (glTF: G=rough, B=metal) + occlusion (R). LINEAR data.
+    vec3 mr = texture(sampler2D(metallic_roughness_map, smp_material), uv_mr).rgb;
     float metallic = material.x * mr.b;
     float roughness = material.y * mr.g;
-    float occ = texture(sampler2D(occlusion_map, smp_material), v_uv).r;
+    float occ = texture(sampler2D(occlusion_map, smp_material), uv_ao).r;
     float ao = 1.0 + material.z * (occ - 1.0); // glTF occlusion strength
 
     vec3 color = pbrShade(v_world_pos, N, V, albedo, metallic, roughness, ao);
-    vec3 em = emissive.rgb * emissive.w * texture(sampler2D(emissive_map, smp_material), v_uv).rgb;
+    vec3 em = emissive.rgb * emissive.w * texture(sampler2D(emissive_map, smp_material), uv_em).rgb;
     frag_color = vec4(color + em, base_color.a);
 }
 @end

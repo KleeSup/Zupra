@@ -34,3 +34,5 @@ pub const Cubemap = @import("cubemap.zig").Cubemap;
 pub const Ibl = @import("ibl.zig").Ibl;
 
 pub const FirstPersonController = @import("fpscontroller.zig").FirstPersonController;
+
+pub const gltf = @import("gltf.zig");

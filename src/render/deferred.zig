@@ -55,6 +55,7 @@ const Environment = @import("environment.zig").Environment;
 
 const GeoVs = shd_geo.VsParams;
 const GeoFs = shd_geo.FsParams;
+const ReconParams = shd_light.ReconParams;
 
 var geo_shader: ?ShaderProgram = null;
 
@@ -135,18 +136,24 @@ pub const GeometryRenderer = struct {
         var fs = GeoFs{
             .base_color = .{ c.r, c.g, c.b, c.a },
             .mat_params = .{ material.metallic, material.roughness, material.occlusion_strength, material.normal_scale },
+            .emissive = .{ material.emissive.r, material.emissive.g, material.emissive.b, material.emissive_strength },
         };
 
         bindings.views[shd_geo.VIEW_base_color_map] = material.map(.base_color).view;
         bindings.views[shd_geo.VIEW_normal_map] = material.map(.normal).view;
         bindings.views[shd_geo.VIEW_metallic_roughness_map] = material.map(.metallic_roughness).view;
         bindings.views[shd_geo.VIEW_occlusion_map] = material.map(.occlusion).view;
+        bindings.views[shd_geo.VIEW_emissive_map] = material.map(.emissive).view;
         bindings.samplers[shd_geo.SMP_smp_material] = self.material_sampler;
 
         sg.applyPipeline(pip);
         sg.applyBindings(bindings);
         sg.applyUniforms(self.shader.slots.vs_params, sg.asRange(&vs));
         sg.applyUniforms(self.shader.slots.fs_params.?, sg.asRange(&fs));
+
+        var uvp = mesh_mod.uvParams(material);
+        sg.applyUniforms(shd_geo.UB_uv_params, sg.asRange(&uvp));
+
         sg.draw(0, mesh.index_count, 1);
     }
 
@@ -224,6 +231,9 @@ pub const DeferredRenderer = struct {
     ) void {
         var params = packLightParams(env.lights(), env.ambient, camera.position);
 
+        const inv_vp = zupra.math.zm.inverse(camera.viewProjection());
+        var recon = ReconParams{ .inv_view_proj = @bitCast(inv_vp) };
+
         const key = PipelineKey{
             .shader = self.shader,
             .layout = .fullscreen, // fullscreen tri uses pos+uv (color slot unused)
@@ -245,8 +255,9 @@ pub const DeferredRenderer = struct {
         bindings.vertex_buffers[0] = self.fullscreen_vbuf;
         bindings.views[shd_light.VIEW_tex_albedo] = gbuf.albedoTexture().view;
         bindings.views[shd_light.VIEW_tex_normal] = gbuf.normalTexture().view;
-        bindings.views[shd_light.VIEW_tex_position] = gbuf.positionTexture().view;
         bindings.views[shd_light.VIEW_tex_material] = gbuf.materialTexture().view;
+        bindings.views[shd_light.VIEW_tex_emissive] = gbuf.emissiveTexture().view;
+        bindings.views[shd_light.VIEW_tex_depth] = gbuf.depthTexture().view;
         bindings.samplers[shd_light.SMP_smp] = self.sampler;
         bindings.views[shd_light.VIEW_irradiance_map] = self.ibl_irradiance;
         bindings.views[shd_light.VIEW_prefilter_map] = self.ibl_prefilter;
@@ -256,6 +267,7 @@ pub const DeferredRenderer = struct {
         sg.applyPipeline(pip);
         sg.applyBindings(bindings);
         sg.applyUniforms(shd_light.UB_light_params, sg.asRange(&params));
+        sg.applyUniforms(shd_light.UB_recon_params, sg.asRange(&recon));
         sg.draw(0, 3, 1);
     }
 };

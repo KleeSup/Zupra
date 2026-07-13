@@ -35,6 +35,7 @@ pub const VertexLayout = enum {
                 l.attrs[1] = .{ .offset = @offsetOf(Vertex3D, "normal"), .format = .FLOAT3 };
                 l.attrs[2] = .{ .offset = @offsetOf(Vertex3D, "uv"), .format = .FLOAT2 };
                 l.attrs[3] = .{ .offset = @offsetOf(Vertex3D, "tangent"), .format = .FLOAT4 };
+                l.attrs[4] = .{ .offset = @offsetOf(Vertex3D, "uv1"), .format = .FLOAT2 };
             },
             .mesh_unlit => {
                 l.buffers[0].stride = @sizeOf(Vertex3D);
@@ -100,7 +101,7 @@ pub const BlendMode = enum {
 
 // Pass signature
 
-/// Max color attachments. 4 covers a typical G-buffer (albedo / normal / material / emissive).
+/// Max color attachments. 4 covers a typical G-buffer (albedo, normal, material and emissive).
 pub const max_color_attachments = 4;
 
 /// Describes the render target a pipeline will be used with. For the swapchain,
@@ -114,7 +115,7 @@ pub const PassSignature = struct {
 
     /// Default swapchain target (1 color + depth, formats resolved by sokol).
     pub fn swapchainPass() PassSignature {
-        return .{ .sample_count = @intCast(@import("sokol").app.sampleCount()) };
+        return .{ .sample_count = @intCast(sokol.app.sampleCount()) };
     }
 
     pub fn swapchainMsaa(samples: u8) PassSignature {

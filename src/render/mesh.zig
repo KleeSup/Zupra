@@ -21,6 +21,7 @@ const zupra = @import("../root.zig");
 const gfx = @import("../graphics/graphics.zig");
 const pipeline = @import("../graphics/pipeline.zig");
 const math = @import("../math.zig");
+const material_mod = @import("material.zig");
 const Camera3D = @import("camera3d.zig").Camera3D;
 
 const shd = @import("shaders").mesh;
@@ -37,14 +38,15 @@ const PassSignature = pipeline.PassSignature;
 const Matrix = math.Matrix;
 const Vec3 = math.Vec3;
 const Color = zupra.Color;
-const Material = @import("material.zig").Material;
+const Material = material_mod.Material;
 const Light = @import("light.zig").Light;
 const LightParams = @import("light.zig").LightParams;
 const packLightParams = @import("light.zig").packLightParams;
 const Environment = @import("environment.zig").Environment;
-const ShadingModel = @import("material.zig").ShadingModel;
+const ShadingModel = material_mod.ShadingModel;
 
 const VsParams = shd.VsParams;
+const UvParams = shd.UvParams;
 const PbrFs = extern struct {
     base_color: [4]f32,
     material: [4]f32, // metallic, roughness, ao, normal_scale
@@ -67,6 +69,18 @@ const ShaderSet = struct {
     lambert: ShaderProgram,
     unlit: ShaderProgram,
 };
+
+pub fn uvParams(m: Material) UvParams {
+    var p: UvParams = undefined;
+    inline for (0..material_mod.map_slot_count) |i| {
+        const x = m.uv_xforms[i];
+        const bit: u8 = @as(u8, 1) << @intCast(i);
+        const set: f32 = if ((m.uv_set & bit) != 0) 1.0 else 0.0;
+        p.uv_m[i] = x.m;
+        p.uv_aux[i] = .{ x.offset[0], x.offset[1], set, 0 };
+    }
+    return p;
+}
 
 var shared_set: ?ShaderSet = null;
 
@@ -290,8 +304,16 @@ pub const MeshRenderer = struct {
         sg.applyUniforms(shader.slots.vs_params, sg.asRange(&vs));
         switch (material.shading) {
             .unlit => sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&unlit_fs)),
-            .lambert => sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&lambert_fs)),
-            .pbr => sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&pbr_fs)),
+            .lambert => {
+                sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&lambert_fs));
+                var uvp = uvParams(material);
+                sg.applyUniforms(shd_lambert.UB_uv_params, sg.asRange(&uvp));
+            },
+            .pbr => {
+                sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&pbr_fs));
+                var uvp = uvParams(material);
+                sg.applyUniforms(shd.UB_uv_params, sg.asRange(&uvp));
+            },
         }
 
         sg.draw(0, mesh.index_count, 1);

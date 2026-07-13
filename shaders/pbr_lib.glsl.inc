@@ -151,11 +151,36 @@ vec2 hammersley(uint i, uint n) {
 // `normal_map` (texture2D) + `smp_material` (sampler) declared in the shader.
 // If no normal map is bound the default is a flat (0.5,0.5,1) texel -> returns N.
 vec3 applyNormalMap(vec3 N, vec3 Tin, float w, vec2 uv, float normal_scale) {
+    // Guard: a degenerate/zero tangent (seams, missing data) would NaN the
+    // normal via normalize() and shade the fragment black. Skip if so.
+    if (dot(Tin, Tin) < 1e-8) return N;
     vec3 T = normalize(Tin - N * dot(N, Tin)); // Gram-Schmidt orthonormalize
     vec3 B = cross(N, T) * w;
     vec3 nm = texture(sampler2D(normal_map, smp_material), uv).xyz * 2.0 - 1.0;
-    nm.xy *= abs(normal_scale);
-    nm.y *= sign(normal_scale);   // negative normal_scale = DX (flip green)
+    nm.xy *= normal_scale;
     return normalize(mat3(T, B, N) * nm);
+}
+@end
+
+@block uv_transform
+// Per-map UV resolution: multiple UV sets (glTF TEXCOORD_0/1) + the
+// KHR_texture_transform. The including shader must declare a uv_params block:
+//
+//     vec4 uv_m[5];    // packed 2x2 (rot*scale): m00, m01, m10, m11
+//     vec4 uv_aux[5];  // offset.x, offset.y, uv_set (0|1), unused
+//
+// Rotation is PRE-BAKED into the 2x2 on the CPU, so there is no sin/cos here —
+// just one 2x2 multiply and an add. Indices below match Material.MapIndex.
+#define UV_BASE_COLOR         0
+#define UV_NORMAL             1
+#define UV_METALLIC_ROUGHNESS 2
+#define UV_OCCLUSION          3
+#define UV_EMISSIVE           4
+
+vec2 mapUv(int i, vec2 uv0, vec2 uv1) {
+    vec2 uv = mix(uv0, uv1, uv_aux[i].z); // pick TEXCOORD_0 or TEXCOORD_1
+    vec4 m = uv_m[i];
+    return vec2(m.x * uv.x + m.y * uv.y,
+                m.z * uv.x + m.w * uv.y) + uv_aux[i].xy;
 }
 @end

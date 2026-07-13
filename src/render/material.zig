@@ -102,8 +102,24 @@ pub const MapSlot = enum(u8) {
 };
 pub const map_slot_count = @typeInfo(MapSlot).@"enum".fields.len;
 
+/// Per-map UV transform (glTF KHR_texture_transform).
+///
+/// The extension composes translation * rotation * scale. Rotation is baked
+/// into a 2x2 at LOAD time, so the shader never evaluates sin/cos, so it just
+/// does one 2x2 multiply plus an add:
+///
+///     uv' = M * uv + offset,  M = [ m[0] m[1] ]
+///                                 [ m[2] m[3] ]
+///
+/// Identity by default, so procedural materials cost nothing.
+pub const UvXform = extern struct {
+    /// Packed 2x2 (rotation * scale), row-major: m00, m01, m10, m11.
+    m: [4]f32 = .{ 1, 0, 0, 1 },
+    offset: [2]f32 = .{ 0, 0 },
+};
+
 pub const Material = struct {
-    // --- factors (always present) ---
+    // --- factors ---
     base_color: Color = .{ .r = 1, .g = 1, .b = 1, .a = 1 },
     metallic: f32 = 0.0,
     roughness: f32 = 0.5,
@@ -130,7 +146,18 @@ pub const Material = struct {
     double_sided: bool = false,
     cull_override: ?sg.CullMode = null,
 
+    /// Bits follow MapIndex (0 base_color, 1 normal, 2 metallic_roughness,
+    /// 3 occlusion, 4 emissive). glTF allows a per-map UV set; occlusion on
+    /// UV1 is common (baked AO uses its own unwrap). Then UvXform carries only the KHR transform.
+    uv_set: u8 = 0,
+    /// Per-map KHR_texture_transform. Identity unless the asset sets it.
+    uv_xforms: [map_slot_count]UvXform = @splat(.{}),
+
     shading: ShadingModel = .pbr,
+
+    pub fn usesUv1(self: Material, comptime map_: comptime_int) bool {
+        return (self.uv_set & (@as(u8, 1) << map_)) != 0;
+    }
 
     /// Resolve a channel to its texture, falling back to the framework default
     /// so the shader always has a bound sampler.
@@ -154,7 +181,7 @@ pub const Material = struct {
     pub fn blendMode(self: Material) BlendMode {
         return switch (self.alpha_mode) {
             .blend => .alpha,
-            else => .none, // opaque + mask both write opaque; mask discards in shader
+            else => .none, // opaque and mask both write opaque, then mask discards in shader
         };
     }
 };

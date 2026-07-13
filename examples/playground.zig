@@ -28,6 +28,9 @@ var metal_model: Model = undefined;
 var rough_model: Model = undefined;
 var glass_model: Model = undefined;
 var wall_model: Model = undefined;
+var helmet_model: Model = undefined;
+
+var model_queue: std.ArrayList(Model) = .empty;
 
 var last_ticks: u64 = 0;
 var t: f32 = 0;
@@ -39,7 +42,7 @@ pub fn main(ctx: std.process.Init) !void {
 
 pub fn init() void {
     cache = .init(gpa);
-    scene = zupra.render.SceneRenderer.init(gpa, &cache, .deferred, 1280, 720);
+    scene = zupra.render.SceneRenderer.init(gpa, &cache, .forward, 1280, 720);
 
     cam = zupra.render.Camera3D.init(16.0 / 9.0);
     controller = .init(.{ .x = 0, .y = 0, .z = 0 });
@@ -94,6 +97,17 @@ pub fn init() void {
         .alpha_mode = .blend,
     }) catch unreachable;
 
+    helmet_model = zupra.render.gltf.loadMemory(gpa, @embedFile("assets/models/ChronographWatch.glb")) catch unreachable;
+    var strength: f32 = 0;
+    for (helmet_model.materials) |mat| {
+        if (mat.occlusion_strength > strength) strength = mat.occlusion_strength;
+    }
+    std.debug.print("HIGHEST OCCLUSION STRENGTH: {d}", .{strength});
+    // for (helmet_model.materials) |*mat| {
+    //     mat.roughness = 1;
+    //     mat.metallic = 0;
+    // }
+
     // Lighting: a warm sun + a colored point light.
     env = .{ .ambient = .{ .r = 0.03, .g = 0.03, .b = 0.04, .a = 1 } };
     env.addLight(Light.directional(.{ .x = -0.5, .y = -1.0, .z = -0.35 }, .{ .r = 1.0, .g = 0.96, .b = 0.9, .a = 1 }, 2.5));
@@ -122,6 +136,9 @@ pub fn render() void {
     var wall = wall_model.instance();
     wall.setPosition(.{ .x = 0, .y = 0, .z = -6 });
 
+    var helmet = helmet_model.instance();
+    helmet.setPosition(.{ .x = 0, .y = 3, .z = 6 });
+
     controller.update(zupra.app.getDelta());
     controller.applyTo(&cam);
     scene.begin(cam, env);
@@ -130,6 +147,7 @@ pub fn render() void {
     scene.draw(rough);
     scene.draw(glass);
     scene.draw(wall);
+    scene.draw(helmet);
     scene.end();
 }
 
@@ -143,6 +161,7 @@ pub fn deinit() void {
     rough_model.deinit();
     glass_model.deinit();
     wall_model.deinit();
+    helmet_model.deinit();
     scene.deinit();
     cache.deinit();
 }
