@@ -126,14 +126,21 @@ pub const GeometryRenderer = struct {
         bindings.vertex_buffers[0] = mesh.vbuf;
         bindings.index_buffer = mesh.ibuf;
 
-        var vs = GeoVs{ .model = @bitCast(model), .view_proj = @bitCast(self.view_proj) };
+        var vs = GeoVs{
+            .model = @bitCast(model),
+            .view_proj = @bitCast(self.view_proj),
+            .uv_scale = .{ material.uv_scale[0], material.uv_scale[1], 0, 0 },
+        };
         const c = material.base_color;
         var fs = GeoFs{
             .base_color = .{ c.r, c.g, c.b, c.a },
             .mat_params = .{ material.metallic, material.roughness, material.occlusion_strength, material.normal_scale },
         };
 
+        bindings.views[shd_geo.VIEW_base_color_map] = material.map(.base_color).view;
         bindings.views[shd_geo.VIEW_normal_map] = material.map(.normal).view;
+        bindings.views[shd_geo.VIEW_metallic_roughness_map] = material.map(.metallic_roughness).view;
+        bindings.views[shd_geo.VIEW_occlusion_map] = material.map(.occlusion).view;
         bindings.samplers[shd_geo.SMP_smp_material] = self.material_sampler;
 
         sg.applyPipeline(pip);

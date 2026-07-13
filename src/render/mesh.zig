@@ -47,15 +47,19 @@ const ShadingModel = @import("material.zig").ShadingModel;
 const VsParams = shd.VsParams;
 const PbrFs = extern struct {
     base_color: [4]f32,
-    materials: [4]f32, // metallic, roughness, ao, unused
+    material: [4]f32, // metallic, roughness, ao, normal_scale
+    emissive: [4]f32, // rgb factor, w strength
     lights: LightParams,
 };
 const LambertFs = extern struct {
     base_color: [4]f32,
-    lights: LightParams, // camera_pos + ambient_count + light arrays (lambert ignores camera_pos)
+    material: [4]f32, // w = normal_scale (x/y/z unused)
+    emissive: [4]f32,
+    lights: LightParams,
 };
 const UnlitFs = extern struct {
     base_color: [4]f32,
+    emissive: [4]f32,
 };
 
 const ShaderSet = struct {
@@ -204,7 +208,7 @@ pub const MeshRenderer = struct {
 
         const key = PipelineKey{
             .shader = shader.handle,
-            .layout = .mesh,
+            .layout = if (material.shading == .unlit) .mesh_unlit else .mesh,
             .index_type = mesh.index_type,
             .pass = self.pass,
             .primitive = .TRIANGLES,
@@ -223,47 +227,71 @@ pub const MeshRenderer = struct {
         bindings.vertex_buffers[0] = mesh.vbuf;
         bindings.index_buffer = mesh.ibuf;
 
-        // IBL bindings only exist on the PBR shader.
-        if (material.shading == .pbr) {
-            bindings.views[shd.VIEW_irradiance_map] = self.ibl_irradiance;
-            bindings.views[shd.VIEW_prefilter_map] = self.ibl_prefilter;
-            bindings.views[shd.VIEW_brdf_lut] = self.ibl_brdf_lut;
-            bindings.samplers[shd.SMP_smp_cube] = self.ibl_sampler;
-            bindings.views[shd.VIEW_normal_map] = material.map(.normal).view;
-            bindings.samplers[shd.SMP_smp_material] = self.material_sampler;
-        }
-
         var vs = VsParams{
             .model = @bitCast(model),
             .view_proj = @bitCast(self.view_proj),
+            .uv_scale = .{ material.uv_scale[0], material.uv_scale[1], 0, 0 },
         };
-        const c = material.base_color;
+
+        const bc = material.base_color;
+        const emc = material.emissive;
+        const es = material.emissive_strength;
+
+        // Per-model: set every texture/sampler binding the shader declares, and
+        // build the matching fs uniform struct. Nothing is applied yet.
+        var pbr_fs: PbrFs = undefined;
+        var lambert_fs: LambertFs = undefined;
+        var unlit_fs: UnlitFs = undefined;
+
+        switch (material.shading) {
+            .unlit => {
+                bindings.views[shd_unlit.VIEW_base_color_map] = material.map(.base_color).view;
+                bindings.views[shd_unlit.VIEW_emissive_map] = material.map(.emissive).view;
+                bindings.samplers[shd_unlit.SMP_smp_material] = self.material_sampler;
+                unlit_fs = .{
+                    .base_color = .{ bc.r, bc.g, bc.b, bc.a },
+                    .emissive = .{ emc.r, emc.g, emc.b, es },
+                };
+            },
+            .lambert => {
+                bindings.views[shd_lambert.VIEW_normal_map] = material.map(.normal).view;
+                bindings.views[shd_lambert.VIEW_base_color_map] = material.map(.base_color).view;
+                bindings.views[shd_lambert.VIEW_emissive_map] = material.map(.emissive).view;
+                bindings.samplers[shd_lambert.SMP_smp_material] = self.material_sampler;
+                lambert_fs = .{
+                    .base_color = .{ bc.r, bc.g, bc.b, bc.a },
+                    .material = .{ 0, 0, 0, if (material.normal_flip_y) -material.normal_scale else material.normal_scale },
+                    .emissive = .{ emc.r, emc.g, emc.b, es },
+                    .lights = self.lights,
+                };
+            },
+            .pbr => {
+                bindings.views[shd.VIEW_irradiance_map] = self.ibl_irradiance;
+                bindings.views[shd.VIEW_prefilter_map] = self.ibl_prefilter;
+                bindings.views[shd.VIEW_brdf_lut] = self.ibl_brdf_lut;
+                bindings.samplers[shd.SMP_smp_cube] = self.ibl_sampler;
+                bindings.views[shd.VIEW_normal_map] = material.map(.normal).view;
+                bindings.views[shd.VIEW_base_color_map] = material.map(.base_color).view;
+                bindings.views[shd.VIEW_emissive_map] = material.map(.emissive).view;
+                bindings.samplers[shd.SMP_smp_material] = self.material_sampler;
+                bindings.views[shd.VIEW_metallic_roughness_map] = material.map(.metallic_roughness).view;
+                bindings.views[shd.VIEW_occlusion_map] = material.map(.occlusion).view;
+                pbr_fs = .{
+                    .base_color = .{ bc.r, bc.g, bc.b, bc.a },
+                    .material = .{ material.metallic, material.roughness, material.occlusion_strength, if (material.normal_flip_y) -material.normal_scale else material.normal_scale },
+                    .emissive = .{ emc.r, emc.g, emc.b, es },
+                    .lights = self.lights,
+                };
+            },
+        }
 
         sg.applyPipeline(pip);
         sg.applyBindings(bindings);
         sg.applyUniforms(shader.slots.vs_params, sg.asRange(&vs));
-
-        // Upload the fs uniforms matching the chosen shader.
         switch (material.shading) {
-            .pbr => {
-                var fs = PbrFs{
-                    .base_color = .{ c.r, c.g, c.b, c.a },
-                    .materials = .{ material.metallic, material.roughness, material.occlusion_strength, material.normal_scale },
-                    .lights = self.lights,
-                };
-                sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&fs));
-            },
-            .lambert => {
-                var fs = LambertFs{
-                    .base_color = .{ c.r, c.g, c.b, c.a },
-                    .lights = self.lights,
-                };
-                sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&fs));
-            },
-            .unlit => {
-                var fs = UnlitFs{ .base_color = .{ c.r, c.g, c.b, c.a } };
-                sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&fs));
-            },
+            .unlit => sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&unlit_fs)),
+            .lambert => sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&lambert_fs)),
+            .pbr => sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&pbr_fs)),
         }
 
         sg.draw(0, mesh.index_count, 1);

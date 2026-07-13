@@ -13,7 +13,8 @@ const IndexType = graphics.IndexType;
 /// The key stays a single enum value rather than a variable-length attr array.
 pub const VertexLayout = enum {
     sprite, // Vertex2D
-    mesh, // Vertex3D
+    mesh, // Vertex3D with pos, normal, uv and tangent
+    mesh_unlit, // Vertex3D buffer with only pos, normal and uv for unlit scenes.
     debug, // VertexDebug
     fullscreen, // Vertex2D buffer, only pos+uv consumed (screen-space passes)
 
@@ -34,6 +35,11 @@ pub const VertexLayout = enum {
                 l.attrs[1] = .{ .offset = @offsetOf(Vertex3D, "normal"), .format = .FLOAT3 };
                 l.attrs[2] = .{ .offset = @offsetOf(Vertex3D, "uv"), .format = .FLOAT2 };
                 l.attrs[3] = .{ .offset = @offsetOf(Vertex3D, "tangent"), .format = .FLOAT4 };
+            },
+            .mesh_unlit => {
+                l.buffers[0].stride = @sizeOf(Vertex3D);
+                l.attrs[0] = .{ .offset = @offsetOf(Vertex3D, "pos"), .format = .FLOAT3 };
+                l.attrs[1] = .{ .offset = @offsetOf(Vertex3D, "uv"), .format = .FLOAT2 };
             },
             .debug => {
                 l.buffers[0].stride = @sizeOf(VertexDebug);

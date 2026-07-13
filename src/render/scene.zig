@@ -123,7 +123,9 @@ pub const SceneRenderer = struct {
         if (self.mode == .deferred) {
             self.lit.deinit();
             self.gbuffer.deinit();
+            self.geo.deinit();
         }
+        self.forward.deinit();
         self.present.deinit();
         self.scene_color.deinit();
         if (self.skybox) |*s| s.deinit();

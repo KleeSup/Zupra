@@ -256,3 +256,88 @@ pub const Sprite = struct {
         self.rotation += (std.math.pi * 0.5) * @as(f32, @floatFromInt(times));
     }
 };
+
+// -=- Packing -=-
+
+/// Pack separate roughness and metalness JPG/PNG byte blobs into one RGBA8 texture
+/// laid out (R=255, G=roughness, B=metallic, A=255).
+/// Both inputs must be the same dimensions. `allocator` is used only
+/// for scratch because the GPU texture owns its data after upload.
+///
+/// Example Usage (with @embedFile):
+///   const mr = try packMetallicRoughness(gpa,
+///       @embedFile("assets/metal/..._Roughness.jpg"),
+///       @embedFile("assets/metal/..._Metalness.jpg"));
+pub fn packMetallicRoughness(
+    allocator: std.mem.Allocator,
+    roughness_bytes: []const u8,
+    metallic_bytes: []const u8,
+) !Texture {
+
+    // Load both as single-channel grayscale.
+    var rough = try zstbi.Image.loadFromMemory(roughness_bytes, 1);
+    defer rough.deinit();
+    var metal = try zstbi.Image.loadFromMemory(metallic_bytes, 1);
+    defer metal.deinit();
+
+    if (rough.width != metal.width or rough.height != metal.height) {
+        return error.MapSizeMismatch;
+    }
+
+    const w = rough.width;
+    const h = rough.height;
+    const px = w * h;
+
+    // Build RGBA8: R=255, G=roughness, B=metallic, A=255.
+    const packed_data = try allocator.alloc(u8, px * 4);
+    defer allocator.free(packed_data);
+
+    var i: usize = 0;
+    while (i < px) : (i += 1) {
+        packed_data[i * 4 + 0] = 255; // R unused (could hold occlusion for ORM)
+        packed_data[i * 4 + 1] = rough.data[i]; // G = roughness
+        packed_data[i * 4 + 2] = metal.data[i]; // B = metallic
+        packed_data[i * 4 + 3] = 255; // A unused
+    }
+
+    // Linear RGBA8 (NOT sRGB — this is data, not color).
+    return Texture.initRaw(packed_data, @intCast(w), @intCast(h));
+}
+
+/// Same as packMetallicRoughness, but also folds an occlusion map into R (glTF "ORM" packing with R=occlusion, G=roughness, B=metallic). Pass all three same-size grayscales.
+pub fn packOcclusionRoughnessMetallic(
+    allocator: std.mem.Allocator,
+    occlusion_bytes: []const u8,
+    roughness_bytes: []const u8,
+    metallic_bytes: []const u8,
+) !Texture {
+    var occ = try zstbi.Image.loadFromMemory(occlusion_bytes, 1);
+    defer occ.deinit();
+    var rough = try zstbi.Image.loadFromMemory(roughness_bytes, 1);
+    defer rough.deinit();
+    var metal = try zstbi.Image.loadFromMemory(metallic_bytes, 1);
+    defer metal.deinit();
+
+    if (rough.width != metal.width or rough.height != metal.height or
+        occ.width != rough.width or occ.height != rough.height)
+    {
+        return error.MapSizeMismatch;
+    }
+
+    const w = rough.width;
+    const h = rough.height;
+    const px = w * h;
+
+    const packed_data = try allocator.alloc(u8, px * 4);
+    defer allocator.free(packed_data);
+
+    var i: usize = 0;
+    while (i < px) : (i += 1) {
+        packed_data[i * 4 + 0] = occ.data[i]; // R = occlusion
+        packed_data[i * 4 + 1] = rough.data[i]; // G = roughness
+        packed_data[i * 4 + 2] = metal.data[i]; // B = metallic
+        packed_data[i * 4 + 3] = 255;
+    }
+
+    return Texture.initRaw(packed_data, @intCast(w), @intCast(h));
+}

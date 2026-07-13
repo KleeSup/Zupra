@@ -19,6 +19,7 @@
 layout(binding=0) uniform vs_params {
     mat4 model;
     mat4 view_proj;
+    vec4 uv_scale; // xy = texture tiling, zw unused
 };
 
 in vec3 pos;
@@ -39,7 +40,7 @@ void main() {
     v_world_normal = mat3(model) * normal;
     v_world_tangent = mat3(model) * tangent.xyz;
     v_tangent_w = tangent.w;
-    v_uv = uv;
+    v_uv = uv * uv_scale.xy;
 }
 @end
 
@@ -50,12 +51,17 @@ layout(binding=0) uniform textureCube irradiance_map;
 layout(binding=1) uniform textureCube prefilter_map;
 layout(binding=2) uniform texture2D brdf_lut;
 layout(binding=3) uniform texture2D normal_map;
+layout(binding=4) uniform texture2D base_color_map;
+layout(binding=5) uniform texture2D emissive_map;
+layout(binding=6) uniform texture2D metallic_roughness_map;
+layout(binding=7) uniform texture2D occlusion_map;
 layout(binding=0) uniform sampler smp_cube;
 layout(binding=1) uniform sampler smp_material;
 
 layout(binding=1) uniform fs_params {
     vec4 base_color;
     vec4 material; // x metallic, y roughness, z ao, w normal_scale
+    vec4 emissive; // rgb factor, w strength
     vec4 camera_pos;
     vec4 ambient_count;
     vec4 light_pos[MAX_LIGHTS];
@@ -82,8 +88,21 @@ void main() {
     N = applyNormalMap(N, v_world_tangent, v_tangent_w, v_uv, material.w);
     vec3 V = normalize(camera_pos.xyz - v_world_pos);
 
-    vec3 color = pbrShade(v_world_pos, N, V, base_color.rgb, material.x, material.y, material.z);
-    frag_color = vec4(color, base_color.a);
+    // Albedo: linear factor * sRGB-decoded texture (default white -> factor).
+    vec3 tex = texture(sampler2D(base_color_map, smp_material), v_uv).rgb;
+    vec3 albedo = base_color.rgb * pow(max(tex, vec3(0.0)), vec3(2.2));
+
+    // Metallic-roughness (glTF: G=roughness, B=metallic) and occlusion (R),
+    // linear (no sRGB). Factors in material.xyz; defaults are white -> factor.
+    vec3 mr = texture(sampler2D(metallic_roughness_map, smp_material), v_uv).rgb;
+    float metallic = material.x * mr.b;
+    float roughness = material.y * mr.g;
+    float occ = texture(sampler2D(occlusion_map, smp_material), v_uv).r;
+    float ao = 1.0 + material.z * (occ - 1.0); // glTF occlusion strength
+
+    vec3 color = pbrShade(v_world_pos, N, V, albedo, metallic, roughness, ao);
+    vec3 em = emissive.rgb * emissive.w * texture(sampler2D(emissive_map, smp_material), v_uv).rgb;
+    frag_color = vec4(color + em, base_color.a);
 }
 @end
 

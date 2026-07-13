@@ -154,7 +154,8 @@ vec3 applyNormalMap(vec3 N, vec3 Tin, float w, vec2 uv, float normal_scale) {
     vec3 T = normalize(Tin - N * dot(N, Tin)); // Gram-Schmidt orthonormalize
     vec3 B = cross(N, T) * w;
     vec3 nm = texture(sampler2D(normal_map, smp_material), uv).xyz * 2.0 - 1.0;
-    nm.xy *= normal_scale;
+    nm.xy *= abs(normal_scale);
+    nm.y *= sign(normal_scale);   // negative normal_scale = DX (flip green)
     return normalize(mat3(T, B, N) * nm);
 }
 @end

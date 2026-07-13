@@ -14,24 +14,27 @@ const Material = zupra.render.Material;
 const MeshBuilder = zupra.render.MeshBuilder;
 const Light = zupra.render.Light;
 const Environment = zupra.render.Environment;
+const Texture = zupra.graphics.texture.Texture;
 
 var gpa: std.mem.Allocator = undefined;
 var cache: zupra.graphics.pipeline.PipelineCache = undefined;
 var scene: zupra.render.SceneRenderer = undefined;
 var cam: zupra.render.Camera3D = undefined;
 var env: Environment = .{};
+var controller: zupra.render.FirstPersonController = undefined;
 
 var floor_model: Model = undefined;
 var metal_model: Model = undefined;
 var rough_model: Model = undefined;
 var glass_model: Model = undefined;
+var wall_model: Model = undefined;
 
 var last_ticks: u64 = 0;
 var t: f32 = 0;
 
 pub fn main(ctx: std.process.Init) !void {
     gpa = ctx.gpa;
-    zupra.init(ctx, .{ .initFn = init, .renderFn = render, .deinitFn = deinit });
+    zupra.init(ctx, .{ .initFn = init, .renderFn = render, .deinitFn = deinit, .eventFn = onEvent });
 }
 
 pub fn init() void {
@@ -39,23 +42,41 @@ pub fn init() void {
     scene = zupra.render.SceneRenderer.init(gpa, &cache, .deferred, 1280, 720);
 
     cam = zupra.render.Camera3D.init(16.0 / 9.0);
+    controller = .init(.{ .x = 0, .y = 0, .z = 0 });
 
     const bricks = zupra.graphics.texture.Texture.initBuffer(@embedFile("assets/bricks/Bricks097_1K-JPG_Color.jpg")) catch unreachable;
+    const bricks_normal = zupra.graphics.texture.Texture.initBuffer(@embedFile("assets/bricks/Bricks097_1K-JPG_NormalGL.jpg")) catch unreachable;
+
+    wall_model = Model.fromMesh(gpa, MeshBuilder.cube(12, 3, 1), .{
+        .base_color_map = bricks,
+        .normal_map = bricks_normal,
+        .shading = .pbr,
+        .roughness = 0.9,
+        .metallic = 0.0,
+        .uv_scale = .{ 6, 2 },
+    }) catch unreachable;
 
     // Floor: large rough dielectric plane.
     floor_model = Model.fromMesh(gpa, MeshBuilder.plane(24, 24), .{
         .base_color = .{ .r = 1, .g = 1, .b = 1, .a = 1 },
-        .metallic = 0.0,
-        .roughness = 0.0,
-        .base_color_map = bricks,
-        .shading = .lambert,
     }) catch unreachable;
 
-    // Polished metal sphere.
-    metal_model = Model.fromMesh(gpa, MeshBuilder.sphere(gpa, 0.7, 48, 48) catch unreachable, .{
-        .base_color = .{ .r = 1.0, .g = 0.8, .b = 0.4, .a = 1 },
-        .metallic = 1.0,
-        .roughness = 0.18,
+    const albedo = Texture.initBuffer(@embedFile("assets/metal/Metal049A_1K-JPG_Color.jpg")) catch unreachable;
+    const normal = Texture.initBuffer(@embedFile("assets/metal/Metal049A_1K-JPG_NormalGL.jpg")) catch unreachable;
+    const mr = zupra.graphics.texture.packMetallicRoughness(
+        gpa,
+        @embedFile("assets/metal/Metal049A_1K-JPG_Roughness.jpg"),
+        @embedFile("assets/metal/Metal049A_1K-JPG_Metalness.jpg"),
+    ) catch unreachable;
+
+    metal_model = Model.fromMesh(gpa, MeshBuilder.sphere(gpa, 1.0, 48, 48) catch unreachable, .{
+        .base_color = .{ .r = 1, .g = 1, .b = 1, .a = 1 },
+        .metallic = 1.0, // factor × map.b
+        .roughness = 1.0, // factor × map.g (use 1.0 so the map drives it)
+        .base_color_map = albedo,
+        .normal_map = normal,
+        .metallic_roughness_map = mr,
+        // normal_flip_y = false,  // GL convention — default; flip to true if bumps invert
     }) catch unreachable;
 
     // Rough dielectric sphere.
@@ -63,8 +84,6 @@ pub fn init() void {
         .base_color = .{ .r = 0.85, .g = 0.25, .b = 0.2, .a = 1 },
         .metallic = 0.0,
         .roughness = 0.65,
-
-        .shading = .pbr,
     }) catch unreachable;
 
     // Transparent sphere (routes to the sorted forward transparent pass).
@@ -87,11 +106,6 @@ pub fn render() void {
     t += @floatCast(sokol.time.sec(sokol.time.diff(now, last_ticks)));
     last_ticks = now;
 
-    // Orbit the camera around the scene.
-    const r: f32 = 6.0;
-    cam.position = .{ .x = @sin(t * 0.3) * r, .y = 3.0, .z = @cos(t * 0.3) * r };
-    cam.target = .{ .x = 0, .y = 0.2, .z = 0 };
-
     var floor = floor_model.instance();
     floor.setPosition(.{ .x = 0, .y = -0.7, .z = 0 });
 
@@ -105,12 +119,22 @@ pub fn render() void {
     var glass = glass_model.instance();
     glass.setPosition(.{ .x = @sin(t * 0.6) * 2.5, .y = 0.1, .z = 2.2 });
 
+    var wall = wall_model.instance();
+    wall.setPosition(.{ .x = 0, .y = 0, .z = -6 });
+
+    controller.update(zupra.app.getDelta());
+    controller.applyTo(&cam);
     scene.begin(cam, env);
     scene.draw(floor);
     scene.draw(metal);
     scene.draw(rough);
     scene.draw(glass);
+    scene.draw(wall);
     scene.end();
+}
+
+pub fn onEvent(event: *const zupra.Event) void {
+    controller.handleEvent(event);
 }
 
 pub fn deinit() void {
@@ -118,6 +142,7 @@ pub fn deinit() void {
     metal_model.deinit();
     rough_model.deinit();
     glass_model.deinit();
+    wall_model.deinit();
     scene.deinit();
     cache.deinit();
 }

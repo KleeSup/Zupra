@@ -108,9 +108,15 @@ pub const Material = struct {
     metallic: f32 = 0.0,
     roughness: f32 = 0.5,
     emissive: Color = .{ .r = 0, .g = 0, .b = 0, .a = 1 }, // rgb used
+    emissive_strength: f32 = 1.0,
     normal_scale: f32 = 1.0,
+
+    /// Important for GL vs DX context where the green channel for the normal needs to be inverted for DX. Default is GL standard which does not need a flip.
+    /// The flip is encoded as the sign of the normal_scale.
+    normal_flip_y: bool = false,
     occlusion_strength: f32 = 1.0,
     alpha_cutoff: f32 = 0.5,
+    uv_scale: [2]f32 = .{ 1, 1 },
 
     // --- maps (null -> default texture; final = factor * sample) ---
     base_color_map: ?Texture = null,

@@ -16,6 +16,7 @@
 layout(binding=0) uniform vs_params {
     mat4 model;
     mat4 view_proj;
+    vec4 uv_scale; // xy = texture tiling, zw unused
 };
 
 in vec3 pos;
@@ -36,12 +37,15 @@ void main() {
     v_world_normal = mat3(model) * normal;
     v_world_tangent = mat3(model) * tangent.xyz;
     v_tangent_w = tangent.w;
-    v_uv = uv;
+    v_uv = uv * uv_scale.xy;
 }
 @end
 
 @fs fs
 layout(binding=0) uniform texture2D normal_map;
+layout(binding=1) uniform texture2D base_color_map;
+layout(binding=2) uniform texture2D metallic_roughness_map;
+layout(binding=3) uniform texture2D occlusion_map;
 layout(binding=0) uniform sampler smp_material;
 
 layout(binding=1) uniform fs_params {
@@ -66,10 +70,19 @@ void main() {
     vec3 N = normalize(v_world_normal);
     N = applyNormalMap(N, v_world_tangent, v_tangent_w, v_uv, mat_params.w);
 
-    g_albedo = base_color;
+    // Albedo: linear factor * sRGB-decoded texture (default white -> factor).
+    vec3 tex = texture(sampler2D(base_color_map, smp_material), v_uv).rgb;
+    vec3 albedo = base_color.rgb * pow(max(tex, vec3(0.0)), vec3(2.2));
+    g_albedo = vec4(albedo, base_color.a);
     g_normal = vec4(N, 1.0);
     g_position = vec4(v_world_pos, 1.0);
-    g_material = vec4(mat_params.xyz, 1.0);
+    // Metallic-roughness (G=rough, B=metal) + occlusion (R), linear.
+    vec3 mr = texture(sampler2D(metallic_roughness_map, smp_material), v_uv).rgb;
+    float metallic = mat_params.x * mr.b;
+    float roughness = mat_params.y * mr.g;
+    float occ = texture(sampler2D(occlusion_map, smp_material), v_uv).r;
+    float ao = 1.0 + mat_params.z * (occ - 1.0);
+    g_material = vec4(metallic, roughness, ao, 1.0);
 }
 @end
 
