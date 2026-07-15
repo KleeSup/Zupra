@@ -138,13 +138,14 @@ pub const GeometryRenderer = struct {
             .mat_params = .{ material.metallic, material.roughness, material.occlusion_strength, material.normal_scale },
             .emissive = .{ material.emissive.r, material.emissive.g, material.emissive.b, material.emissive_strength },
         };
+        const mat_smp = material.sampler orelse self.material_sampler;
 
         bindings.views[shd_geo.VIEW_base_color_map] = material.map(.base_color).view;
         bindings.views[shd_geo.VIEW_normal_map] = material.map(.normal).view;
         bindings.views[shd_geo.VIEW_metallic_roughness_map] = material.map(.metallic_roughness).view;
         bindings.views[shd_geo.VIEW_occlusion_map] = material.map(.occlusion).view;
         bindings.views[shd_geo.VIEW_emissive_map] = material.map(.emissive).view;
-        bindings.samplers[shd_geo.SMP_smp_material] = self.material_sampler;
+        bindings.samplers[shd_geo.SMP_smp_material] = mat_smp;
 
         sg.applyPipeline(pip);
         sg.applyBindings(bindings);

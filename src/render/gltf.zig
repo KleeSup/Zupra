@@ -30,6 +30,7 @@ const light_mod = @import("light.zig");
 const cameramod = @import("camera3d.zig");
 const mathz = @import("../math.zig");
 const zm = mathz.zm;
+const sg = @import("sokol").gfx;
 
 const Vertex3D = graphics.Vertex3D;
 const Texture = texmod.Texture;
@@ -48,6 +49,8 @@ const zupra = @import("../root.zig");
 fn rhToLh() Matrix {
     return zm.scaling(1, 1, -1);
 }
+
+const flipIndices = false;
 
 // ===========================================================================
 //  Public API
@@ -132,10 +135,22 @@ pub fn loadSceneMemory(allocator: std.mem.Allocator, bytes: []const u8) !Scene {
 
 const TexCache = std.AutoHashMapUnmanaged(*c.Image, Texture);
 
+/// Sampler cache key: sokol samplers are a limited pool, so dedup identical
+/// wrap/filter combinations across all textures in the model.
+const SamplerKey = struct {
+    wrap_u: sg.Wrap,
+    wrap_v: sg.Wrap,
+    min: sg.Filter,
+    mag: sg.Filter,
+    mip: sg.Filter,
+};
+const SamplerCache = std.AutoHashMapUnmanaged(SamplerKey, sg.Sampler);
+
 const Builder = struct {
     allocator: std.mem.Allocator,
     base_dir: []const u8,
     cache: TexCache = .{},
+    samplers: SamplerCache = .{},
     flip: Matrix,
 
     meshes: std.ArrayListUnmanaged(Mesh) = .empty,
@@ -148,6 +163,7 @@ const Builder = struct {
 fn buildScene(allocator: std.mem.Allocator, data: *c.Data, base_dir: []const u8) !Scene {
     var b = Builder{ .allocator = allocator, .base_dir = base_dir, .flip = rhToLh() };
     defer b.cache.deinit(allocator);
+    defer b.samplers.deinit(allocator);
 
     // Walk the active scene's node hierarchy. cgltf gives us each node's WORLD
     // transform directly (it composes the parent chain), so no manual recursion
@@ -310,18 +326,30 @@ fn pushPrim(b: *Builder, prim: *c.Primitive, verts: []Vertex3D, idx: graphics.In
 fn readIndicesFlipped(comptime I: type, acc: *c.Accessor, out: []I) void {
     var k: usize = 0;
     while (k + 2 < acc.count + 1 and k + 2 < out.len) : (k += 3) {
-        out[k + 0] = @intCast(acc.readIndex(k + 0));
-        out[k + 1] = @intCast(acc.readIndex(k + 2));
-        out[k + 2] = @intCast(acc.readIndex(k + 1));
+        if (comptime flipIndices) {
+            out[k + 0] = @intCast(acc.readIndex(k + 0));
+            out[k + 1] = @intCast(acc.readIndex(k + 2));
+            out[k + 2] = @intCast(acc.readIndex(k + 1));
+        } else {
+            out[k + 0] = @intCast(acc.readIndex(k + 0));
+            out[k + 1] = @intCast(acc.readIndex(k + 1));
+            out[k + 2] = @intCast(acc.readIndex(k + 2));
+        }
     }
 }
 
 fn fillFlippedSeq(comptime I: type, out: []I) void {
     var k: usize = 0;
     while (k + 2 < out.len + 1 and k + 2 < out.len) : (k += 3) {
-        out[k + 0] = @intCast(k + 0);
-        out[k + 1] = @intCast(k + 2);
-        out[k + 2] = @intCast(k + 1);
+        if (comptime flipIndices) {
+            out[k + 0] = @intCast(k + 0);
+            out[k + 1] = @intCast(k + 2);
+            out[k + 2] = @intCast(k + 1);
+        } else {
+            out[k + 0] = @intCast(k + 0);
+            out[k + 1] = @intCast(k + 1);
+            out[k + 2] = @intCast(k + 2);
+        }
     }
 }
 
@@ -407,6 +435,69 @@ fn setMapUv(mat: *Material, comptime idx: comptime_int, view: c.TextureView) voi
         .offset = off,
     };
     if (set == 1) mat.uv_set |= (@as(u8, 1) << idx);
+}
+
+/// Get-or-create the sokol sampler matching a material's glTF sampler. Uses the
+/// first textured slot found (base_color, then the data maps); if none declares
+/// a glTF sampler, returns null and the renderer falls back to its default.
+fn resolveSamplerImpl(b: *Builder, gm: *c.Material) !?sg.Sampler {
+    const views = [_]c.TextureView{
+        if (gm.has_pbr_metallic_roughness != 0) gm.pbr_metallic_roughness.base_color_texture else .{ .texture = null, .texcoord = 0, .scale = 1, .has_transform = 0, .transform = undefined },
+        gm.normal_texture,
+        if (gm.has_pbr_metallic_roughness != 0) gm.pbr_metallic_roughness.metallic_roughness_texture else .{ .texture = null, .texcoord = 0, .scale = 1, .has_transform = 0, .transform = undefined },
+        gm.occlusion_texture,
+        gm.emissive_texture,
+    };
+    for (views) |v| {
+        const t = v.texture orelse continue;
+        const gs = t.sampler orelse continue;
+        const mf = minFilter(gs.min_filter);
+        const key = SamplerKey{
+            .wrap_u = wrap(gs.wrap_s),
+            .wrap_v = wrap(gs.wrap_t),
+            .min = mf.min,
+            .mag = magFilter(gs.mag_filter),
+            .mip = mf.mip,
+        };
+        if (b.samplers.get(key)) |sm| return sm;
+        const sm = sg.makeSampler(.{
+            .wrap_u = key.wrap_u,
+            .wrap_v = key.wrap_v,
+            .min_filter = key.min,
+            .mag_filter = key.mag,
+            .mipmap_filter = key.mip,
+        });
+        try b.samplers.put(b.allocator, key, sm);
+        return sm;
+    }
+    return null;
+}
+
+fn wrap(w: c.WrapMode) sg.Wrap {
+    return switch (w) {
+        .clamp_to_edge => .CLAMP_TO_EDGE,
+        .mirrored_repeat => .MIRRORED_REPEAT,
+        .repeat => .REPEAT,
+    };
+}
+
+fn minFilter(f: c.FilterType) struct { min: sg.Filter, mip: sg.Filter } {
+    return switch (f) {
+        .nearest => .{ .min = .NEAREST, .mip = .NONE },
+        .linear => .{ .min = .LINEAR, .mip = .NONE },
+        .nearest_mipmap_nearest => .{ .min = .NEAREST, .mip = .NEAREST },
+        .linear_mipmap_nearest => .{ .min = .LINEAR, .mip = .NEAREST },
+        .nearest_mipmap_linear => .{ .min = .NEAREST, .mip = .LINEAR },
+        .linear_mipmap_linear => .{ .min = .LINEAR, .mip = .LINEAR },
+        .undefined => .{ .min = .LINEAR, .mip = .LINEAR },
+    };
+}
+
+fn magFilter(f: c.FilterType) sg.Filter {
+    return switch (f) {
+        .nearest => .NEAREST,
+        else => .LINEAR,
+    };
 }
 
 fn loadTexView(b: *Builder, view: c.TextureView) !?Texture {

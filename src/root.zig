@@ -70,7 +70,10 @@ pub fn beginDrawingClear(clear_color: Color) void {
 /// Begin a drawing pass without clearing the screen.
 /// This is useful for drawing on top of existing content, but make sure to call endDrawing() when you're done.
 pub fn beginDrawing() void {
-    beginDrawingPass(.{ .swapchain = sokol.glue.swapchain() });
+    var action = sokol.gfx.PassAction{};
+    action.colors[0] = .{ .load_action = .LOAD };
+    action.depth = .{ .load_action = .DONTCARE };
+    beginDrawingPass(.{ .action = action, .swapchain = sokol.glue.swapchain() });
 }
 
 /// Begin a pass that renders INTO a framebuffer instead of the swapchain.

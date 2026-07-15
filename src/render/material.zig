@@ -145,6 +145,7 @@ pub const Material = struct {
     alpha_mode: AlphaMode = .opaque_,
     double_sided: bool = false,
     cull_override: ?sg.CullMode = null,
+    sampler: ?sg.Sampler = null,
 
     /// Bits follow MapIndex (0 base_color, 1 normal, 2 metallic_roughness,
     /// 3 occlusion, 4 emissive). glTF allows a per-map UV set; occlusion on

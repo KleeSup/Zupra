@@ -15,6 +15,7 @@ const MeshBuilder = zupra.render.MeshBuilder;
 const Light = zupra.render.Light;
 const Environment = zupra.render.Environment;
 const Texture = zupra.graphics.texture.Texture;
+const Camera2D = zupra.render.Camera2D;
 
 var gpa: std.mem.Allocator = undefined;
 var cache: zupra.graphics.pipeline.PipelineCache = undefined;
@@ -22,6 +23,15 @@ var scene: zupra.render.SceneRenderer = undefined;
 var cam: zupra.render.Camera3D = undefined;
 var env: Environment = .{};
 var controller: zupra.render.FirstPersonController = undefined;
+var font: zupra.render.Font = undefined;
+var batch: zupra.render.SpriteBatch = undefined;
+var ui_cam: Camera2D = undefined;
+var text: zupra.render.TextBatch2D = undefined;
+
+var fps_accum: f32 = 0;
+var fps_frames: u32 = 0;
+var fps_buf: [64]u8 = undefined;
+var fps_text: []const u8 = "";
 
 var floor_model: Model = undefined;
 var metal_model: Model = undefined;
@@ -42,10 +52,15 @@ pub fn main(ctx: std.process.Init) !void {
 
 pub fn init() void {
     cache = .init(gpa);
-    scene = zupra.render.SceneRenderer.init(gpa, &cache, .forward, 1280, 720);
+    scene = zupra.render.SceneRenderer.init(gpa, &cache, .deferred, 1280, 720);
 
     cam = zupra.render.Camera3D.init(16.0 / 9.0);
     controller = .init(.{ .x = 0, .y = 0, .z = 0 });
+
+    font = zupra.render.Font.initFromMemory(gpa, @embedFile("assets/OpenSans-Regular.ttf"), .{}) catch unreachable;
+    batch = zupra.render.SpriteBatch.init(gpa, &cache, .{}) catch unreachable;
+    ui_cam = Camera2D.init(1280, 720);
+    text = zupra.render.TextBatch2D.init(&font, &batch);
 
     const bricks = zupra.graphics.texture.Texture.initBuffer(@embedFile("assets/bricks/Bricks097_1K-JPG_Color.jpg")) catch unreachable;
     const bricks_normal = zupra.graphics.texture.Texture.initBuffer(@embedFile("assets/bricks/Bricks097_1K-JPG_NormalGL.jpg")) catch unreachable;
@@ -98,15 +113,6 @@ pub fn init() void {
     }) catch unreachable;
 
     helmet_model = zupra.render.gltf.loadMemory(gpa, @embedFile("assets/models/ChronographWatch.glb")) catch unreachable;
-    var strength: f32 = 0;
-    for (helmet_model.materials) |mat| {
-        if (mat.occlusion_strength > strength) strength = mat.occlusion_strength;
-    }
-    std.debug.print("HIGHEST OCCLUSION STRENGTH: {d}", .{strength});
-    // for (helmet_model.materials) |*mat| {
-    //     mat.roughness = 1;
-    //     mat.metallic = 0;
-    // }
 
     // Lighting: a warm sun + a colored point light.
     env = .{ .ambient = .{ .r = 0.03, .g = 0.03, .b = 0.04, .a = 1 } };
@@ -149,6 +155,24 @@ pub fn render() void {
     scene.draw(wall);
     scene.draw(helmet);
     scene.end();
+
+    // Debug
+    const dt = zupra.app.getDelta();
+    fps_accum += dt;
+    fps_frames += 1;
+    if (fps_accum >= 0.25) { // refresh 4x/sec
+        const fps = @as(f32, @floatFromInt(fps_frames)) / fps_accum;
+        fps_text = std.fmt.bufPrint(&fps_buf, "{d:.0} FPS   {d:.2} ms", .{ fps, 1000.0 / fps }) catch "FPS ?";
+        fps_accum = 0;
+        fps_frames = 0;
+    }
+
+    ui_cam.setViewport(sokol.app.widthf(), sokol.app.heightf());
+    zupra.beginDrawing();
+    text.begin(ui_cam);
+    text.draw(fps_text, 12, 12, 0.4, zupra.colors.WHITE);
+    text.end();
+    zupra.endDrawing();
 }
 
 pub fn onEvent(event: *const zupra.Event) void {
@@ -156,6 +180,8 @@ pub fn onEvent(event: *const zupra.Event) void {
 }
 
 pub fn deinit() void {
+    font.deinit();
+    batch.deinit(gpa);
     floor_model.deinit();
     metal_model.deinit();
     rough_model.deinit();
