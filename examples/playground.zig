@@ -113,6 +113,9 @@ pub fn init() void {
     }) catch unreachable;
 
     helmet_model = zupra.render.gltf.loadMemory(gpa, @embedFile("assets/models/ChronographWatch.glb")) catch unreachable;
+    for (helmet_model.materials) |*mat| {
+        mat.shading = .pbr;
+    }
 
     // Lighting: a warm sun + a colored point light.
     env = .{ .ambient = .{ .r = 0.03, .g = 0.03, .b = 0.04, .a = 1 } };

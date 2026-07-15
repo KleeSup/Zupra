@@ -41,6 +41,7 @@ pub const VertexLayout = enum {
                 l.buffers[0].stride = @sizeOf(Vertex3D);
                 l.attrs[0] = .{ .offset = @offsetOf(Vertex3D, "pos"), .format = .FLOAT3 };
                 l.attrs[1] = .{ .offset = @offsetOf(Vertex3D, "uv"), .format = .FLOAT2 };
+                l.attrs[2] = .{ .offset = @offsetOf(Vertex3D, "uv1"), .format = .FLOAT2 };
             },
             .debug => {
                 l.buffers[0].stride = @sizeOf(VertexDebug);

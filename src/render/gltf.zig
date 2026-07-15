@@ -404,6 +404,8 @@ fn buildMaterial(b: *Builder, prim: *c.Primitive) !Material {
     setMapUv(&mat, @intFromEnum(MapSlot.occlusion), gm.occlusion_texture);
     setMapUv(&mat, @intFromEnum(MapSlot.emissive), gm.emissive_texture);
 
+    mat.sampler = resolveSamplerImpl(b, gm) catch null;
+
     return mat;
 }
 
@@ -431,34 +433,66 @@ fn setMapUv(mat: *Material, comptime idx: comptime_int, view: c.TextureView) voi
     const cr = @cos(rot);
     const sr = @sin(rot);
     mat.uv_xforms[idx] = .{
-        .m = .{ cr * scl[0], sr * scl[1], -sr * scl[0], cr * scl[1] },
+        // FIXED: -sr * scl[1] and sr * scl[0]
+        .m = .{ cr * scl[0], -sr * scl[1], sr * scl[0], cr * scl[1] },
         .offset = off,
     };
     if (set == 1) mat.uv_set |= (@as(u8, 1) << idx);
+}
+/// When the glTF texture has no sampler,
+// pick the wrap from the base-color transform. A scale > 1 windows into a
+// sub-region (needs CLAMP) but otherwise use REPEAT (glTF default / tiling).
+fn wrapForAbsentSampler(view: c.TextureView) sg.Wrap {
+    if (view.has_transform != 0) {
+        // If a transform is present (scale or offset), it's likely a decal.
+        // Clamp the edges so the texture doesn't tile across the rest of the geometry.
+        return .CLAMP_TO_EDGE;
+    }
+    return .REPEAT;
 }
 
 /// Get-or-create the sokol sampler matching a material's glTF sampler. Uses the
 /// first textured slot found (base_color, then the data maps); if none declares
 /// a glTF sampler, returns null and the renderer falls back to its default.
 fn resolveSamplerImpl(b: *Builder, gm: *c.Material) !?sg.Sampler {
+    const empty = c.TextureView{ .texture = null, .texcoord = 0, .scale = 1, .has_transform = 0, .transform = undefined };
     const views = [_]c.TextureView{
-        if (gm.has_pbr_metallic_roughness != 0) gm.pbr_metallic_roughness.base_color_texture else .{ .texture = null, .texcoord = 0, .scale = 1, .has_transform = 0, .transform = undefined },
+        if (gm.has_pbr_metallic_roughness != 0) gm.pbr_metallic_roughness.base_color_texture else empty,
         gm.normal_texture,
-        if (gm.has_pbr_metallic_roughness != 0) gm.pbr_metallic_roughness.metallic_roughness_texture else .{ .texture = null, .texcoord = 0, .scale = 1, .has_transform = 0, .transform = undefined },
+        if (gm.has_pbr_metallic_roughness != 0) gm.pbr_metallic_roughness.metallic_roughness_texture else empty,
         gm.occlusion_texture,
         gm.emissive_texture,
     };
     for (views) |v| {
-        const t = v.texture orelse continue;
-        const gs = t.sampler orelse continue;
-        const mf = minFilter(gs.min_filter);
-        const key = SamplerKey{
-            .wrap_u = wrap(gs.wrap_s),
-            .wrap_v = wrap(gs.wrap_t),
-            .min = mf.min,
-            .mag = magFilter(gs.mag_filter),
-            .mip = mf.mip,
-        };
+        const t = v.texture orelse continue; // no texture in this slot -> try next
+
+        var key: SamplerKey = undefined;
+        if (t.sampler) |gs| {
+            // Explicit glTF sampler: honor it exactly.
+            const mf = minFilter(gs.min_filter);
+            key = .{
+                .wrap_u = wrap(gs.wrap_s),
+                .wrap_v = wrap(gs.wrap_t),
+                .min = mf.min,
+                .mag = magFilter(gs.mag_filter),
+                .mip = mf.mip,
+            };
+        } else {
+
+            // NO glTF sampler (very common — exporters omit it). Spec default is
+            // REPEAT, but a KHR_texture_transform that scales UVs > 1 windows a
+            // sub-region and relies on CLAMP (e.g. the watch logo plates). Decide
+            // from the BASE-COLOR transform (the visibly-addressed map), not just
+            // this slot. Deliberate, pragmatic deviation from the literal spec
+            // default — every engine does some version of this.
+            const decide = if (gm.has_pbr_metallic_roughness != 0 and gm.pbr_metallic_roughness.base_color_texture.texture != null)
+                gm.pbr_metallic_roughness.base_color_texture
+            else
+                v;
+            const wm = wrapForAbsentSampler(decide);
+            key = .{ .wrap_u = wm, .wrap_v = wm, .min = .LINEAR, .mag = .LINEAR, .mip = .LINEAR };
+        }
+
         if (b.samplers.get(key)) |sm| return sm;
         const sm = sg.makeSampler(.{
             .wrap_u = key.wrap_u,
@@ -470,7 +504,7 @@ fn resolveSamplerImpl(b: *Builder, gm: *c.Material) !?sg.Sampler {
         try b.samplers.put(b.allocator, key, sm);
         return sm;
     }
-    return null;
+    return null; // no textures at all -> renderer uses its default sampler
 }
 
 fn wrap(w: c.WrapMode) sg.Wrap {
@@ -483,8 +517,8 @@ fn wrap(w: c.WrapMode) sg.Wrap {
 
 fn minFilter(f: c.FilterType) struct { min: sg.Filter, mip: sg.Filter } {
     return switch (f) {
-        .nearest => .{ .min = .NEAREST, .mip = .NONE },
-        .linear => .{ .min = .LINEAR, .mip = .NONE },
+        .nearest => .{ .min = .NEAREST, .mip = .NEAREST },
+        .linear => .{ .min = .LINEAR, .mip = .NEAREST },
         .nearest_mipmap_nearest => .{ .min = .NEAREST, .mip = .NEAREST },
         .linear_mipmap_nearest => .{ .min = .LINEAR, .mip = .NEAREST },
         .nearest_mipmap_linear => .{ .min = .NEAREST, .mip = .LINEAR },

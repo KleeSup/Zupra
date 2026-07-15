@@ -95,8 +95,8 @@ pub const AlphaMode = enum(u8) {
 /// these same slot indices; the renderer binds map(slot) for each.
 pub const MapSlot = enum(u8) {
     base_color = 0,
-    metallic_roughness = 1, // glTF packing: G = roughness, B = metallic
-    normal = 2,
+    normal = 1,
+    metallic_roughness = 2, // glTF packing: G = roughness, B = metallic
     occlusion = 3, // R channel
     emissive = 4,
 };

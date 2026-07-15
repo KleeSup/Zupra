@@ -303,8 +303,13 @@ pub const MeshRenderer = struct {
         sg.applyPipeline(pip);
         sg.applyBindings(bindings);
         sg.applyUniforms(shader.slots.vs_params, sg.asRange(&vs));
+
         switch (material.shading) {
-            .unlit => sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&unlit_fs)),
+            .unlit => {
+                sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&unlit_fs));
+                var uvp = uvParams(material);
+                sg.applyUniforms(shd_unlit.UB_uv_params, sg.asRange(&uvp));
+            },
             .lambert => {
                 sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&lambert_fs));
                 var uvp = uvParams(material);
