@@ -12,6 +12,8 @@ pub const FontOptions = @import("font.zig").FontOptions;
 pub const TextBatch2D = @import("font.zig").TextBatch2D;
 pub const Framebuffer = @import("framebuffer.zig").Framebuffer;
 pub const FramebufferOptions = @import("framebuffer.zig").FramebufferOptions;
+pub const PostChain = @import("posprocess.zig").PostChain;
+pub const AAMethod = @import("posprocess.zig").AAMethod;
 
 pub const Mesh = @import("mesh.zig").Mesh;
 pub const MeshRenderer = @import("mesh.zig").MeshRenderer;

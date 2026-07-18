@@ -14,6 +14,8 @@ const sokol = @import("sokol");
 const std = @import("std");
 const zstbi = @import("zstbi");
 const zmesh = @import("zmesh");
+const builtin = @import("builtin");
+const postprocess = @import("render/posprocess.zig");
 
 // --- Color ---
 
@@ -118,12 +120,20 @@ pub fn getIo() std.Io {
     return io;
 }
 
+pub fn getGPA() std.mem.Allocator {
+    return user_config.gpa;
+}
+
+pub fn getContext() std.process.Init {
+    return context;
+}
+
 pub const PoolSetup = struct {
-    buffer_pool_size: i32 = 0,
-    image_pool_size: i32 = 0,
-    sampler_pool_size: i32 = 0,
+    buffer_pool_size: i32 = 4096,
+    image_pool_size: i32 = 2048,
+    sampler_pool_size: i32 = 256,
+    pipeline_pool_size: i32 = 1024,
     shader_pool_size: i32 = 0,
-    pipeline_pool_size: i32 = 0,
     view_pool_size: i32 = 0,
     uniform_buffer_size: i32 = 0,
 };
@@ -146,6 +156,8 @@ pub const Config = struct {
 var user_config: Config = undefined;
 var intern_deinit: *const fn () void = undefined;
 var io: std.Io = undefined;
+var gpa: std.mem.Allocator = undefined;
+var context: std.process.Init = undefined;
 
 pub fn init(ctx: std.process.Init, config: Config) void {
     user_config = config;
@@ -163,7 +175,9 @@ pub fn init(ctx: std.process.Init, config: Config) void {
         .logger = .{ .func = sokol.log.func },
     };
 
+    context = ctx;
     io = ctx.io;
+    gpa = ctx.gpa;
 
     zstbi.init(ctx.io, std.heap.c_allocator);
     zmesh.init(std.heap.c_allocator);
@@ -198,9 +212,9 @@ export fn _deinit() void {
 }
 
 export fn _render() void {
-    input._updateFrame();
     user_config.renderFn();
     sokol.gfx.commit();
+    input._updateFrame();
 }
 export fn _event(event: [*c]const sokol.app.Event) callconv(.c) void {
     input._updateEvent(event);

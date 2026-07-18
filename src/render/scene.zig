@@ -48,6 +48,8 @@ const Matrix = math.Matrix;
 const Color = zupra.Color;
 const Skybox = @import("skybox.zig").Skybox;
 const Ibl = @import("ibl.zig").Ibl;
+const PostChain = @import("posprocess.zig").PostChain;
+const AAMethod = @import("posprocess.zig").AAMethod;
 
 pub const ShadingMode = enum { forward, deferred };
 
@@ -71,9 +73,11 @@ pub const SceneRenderer = struct {
     width: u32,
     height: u32,
     clear_color: Color = .{ .r = 0.02, .g = 0.02, .b = 0.03, .a = 1 },
+    render_scale: u8 = 1,
+    msaa_samples: u8 = 1,
 
     scene_color: Framebuffer,
-    present: Present,
+    post: PostChain,
     skybox: ?Skybox = null,
     ibl: ?Ibl = null,
     ibl_baked: bool = false,
@@ -101,9 +105,11 @@ pub const SceneRenderer = struct {
             .allocator = allocator,
             .width = width,
             .height = height,
-            .scene_color = makeSceneColor(mode, width, height),
-            .present = Present.init(cache),
+            .scene_color = undefined,
+            .post = undefined,
         };
+        self.scene_color = self.makeSceneColor(mode, width, height);
+        self.post = PostChain.init(cache, width, height, self.clear_color);
         // Forward renderer exists in BOTH modes: forward mode uses it for
         // opaque, and both modes use it to forward-shade transparents.
         self.forward = MeshRenderer.init(cache);
@@ -126,13 +132,25 @@ pub const SceneRenderer = struct {
             self.geo.deinit();
         }
         self.forward.deinit();
-        self.present.deinit();
+        self.post.deinit();
         self.scene_color.deinit();
         if (self.skybox) |*s| s.deinit();
         if (self.ibl) |*ibl| ibl.deinit();
     }
 
-    fn makeSceneColor(mode: ShadingMode, w: u32, h: u32) Framebuffer {
+    pub fn setRenderScale(self: *SceneRenderer, scale: u8) void {
+        if (scale == self.render_scale) return;
+        self.render_scale = @max(1, scale);
+        self.width = 0; // force ensureSize to rebuild next frame
+    }
+
+    pub fn setMsaa(self: *SceneRenderer, samples: u8) void {
+        if (samples == self.msaa_samples) return;
+        self.msaa_samples = @max(1, samples);
+        self.width = 0; // force ensureSize to recreate the target next frame
+    }
+
+    fn makeSceneColor(self: *SceneRenderer, mode: ShadingMode, w: u32, h: u32) Framebuffer {
         return Framebuffer.init(.{
             .width = w,
             .height = h,
@@ -140,19 +158,29 @@ pub const SceneRenderer = struct {
             // forward writes opaque depth here; deferred lighting is fullscreen
             // (its depth lives in the G-buffer), so none needed yet.
             .depth_format = if (mode == .forward) .DEPTH else .NONE,
+            .sample_count = if (mode == .forward) self.msaa_samples else 1,
         });
     }
 
     fn ensureSize(self: *SceneRenderer, w: u32, h: u32) void {
-        if (w == 0 or h == 0 or (w == self.width and h == self.height)) return;
+        if (w == 0 or h == 0) return;
+        const s: u32 = self.render_scale;
+        const rw = w * s;
+        const rh = h * s;
+        if (rw == self.width and rh == self.height) return;
         self.scene_color.deinit();
-        self.scene_color = makeSceneColor(self.mode, w, h);
+        self.scene_color = self.makeSceneColor(self.mode, rw, rh);
         if (self.mode == .deferred) {
             self.gbuffer.deinit();
-            self.gbuffer = GBuffer.init(w, h);
+            self.gbuffer = GBuffer.init(rw, rh);
         }
-        self.width = w;
-        self.height = h;
+        self.post.resize(rw, rh);
+        self.width = rw;
+        self.height = rh;
+    }
+
+    pub fn setAAMethod(self: *SceneRenderer, method: AAMethod) void {
+        self.post.aa = method;
     }
 
     pub fn begin(self: *SceneRenderer, camera: Camera3D, env: Environment) void {
@@ -258,9 +286,7 @@ pub const SceneRenderer = struct {
         self.composite();
 
         // Present: tonemap scene-color (HDR) onto the swapchain.
-        zupra.beginDrawingClear(self.clear_color);
-        self.present.render(self.scene_color.asTexture(), PassSignature.swapchainPass());
-        zupra.endDrawing();
+        self.post.present(self.scene_color.asTexture());
     }
 
     fn composite(self: *SceneRenderer) void {

@@ -53,6 +53,7 @@ pub fn main(ctx: std.process.Init) !void {
 pub fn init() void {
     cache = .init(gpa);
     scene = zupra.render.SceneRenderer.init(gpa, &cache, .deferred, 1280, 720);
+    scene.setAAMethod(.none);
 
     cam = zupra.render.Camera3D.init(16.0 / 9.0);
     controller = .init(.{ .x = 0, .y = 0, .z = 0 });
@@ -112,7 +113,7 @@ pub fn init() void {
         .alpha_mode = .blend,
     }) catch unreachable;
 
-    helmet_model = zupra.render.gltf.loadMemory(gpa, @embedFile("assets/models/ChronographWatch.glb")) catch unreachable;
+    helmet_model = zupra.render.gltf.loadMemory(gpa, @embedFile("assets/models/CarConcept.glb")) catch unreachable;
     for (helmet_model.materials) |*mat| {
         mat.shading = .pbr;
     }
@@ -125,6 +126,28 @@ pub fn init() void {
 }
 
 pub fn render() void {
+    if (zupra.input.isKeyJustPressed(._1)) { // raw
+        scene.setAAMethod(.none);
+        scene.setRenderScale(1);
+        std.debug.print("Switched to: RAW\n", .{});
+    } else if (zupra.input.isKeyJustPressed(._2)) { // FXAA
+        scene.setAAMethod(.fxaa);
+        scene.setRenderScale(1);
+        std.debug.print("Switched to: FXAA\n", .{});
+    } else if (zupra.input.isKeyJustPressed(._3)) { // better FXAA
+        scene.setAAMethod(.fxaa_quality);
+        scene.setRenderScale(1);
+        std.debug.print("Switched to: FXAA_Q\n", .{});
+    } else if (zupra.input.isKeyJustPressed(._4)) { // 2x SSAA
+        scene.setAAMethod(.none);
+        scene.setRenderScale(2);
+        std.debug.print("Switched to: 2x SSAA\n", .{});
+    } else if (zupra.input.isKeyJustPressed(._5)) { // both
+        scene.setAAMethod(.fxaa);
+        scene.setRenderScale(2);
+        std.debug.print("Switched to: BOTH\n", .{});
+    }
+
     const now = sokol.time.now();
     t += @floatCast(sokol.time.sec(sokol.time.diff(now, last_ticks)));
     last_ticks = now;
