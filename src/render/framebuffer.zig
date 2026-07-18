@@ -33,6 +33,20 @@ pub const FramebufferOptions = struct {
     sample_count: u8 = 1,
 };
 
+pub const PassOptions = struct {
+    action: sg.PassAction,
+    /// Override the depth-stencil attachment. Deferred forward sub-passes attach
+    /// the G-BUFFER's depth (so they depth-test/write against deferred geometry)
+    /// rather than this framebuffer's own. null = use this framebuffer's depth.
+    depth_view: ?sg.View = null,
+    /// Whether this pass resolves MSAA into the sampleable image at endPass.
+    /// Only meaningful when sample_count > 1. Leave true unless you're chaining
+    /// several passes into the same target and only the LAST one needs to
+    /// resolve — an MSAA resolve of an RGBA16F target isn't free, so skipping
+    /// the intermediate ones is a real saving.
+    resolve: bool = true,
+};
+
 pub const Framebuffer = struct {
     width: u32,
     height: u32,
@@ -124,18 +138,6 @@ pub const Framebuffer = struct {
         sg.destroyImage(self.color_img);
     }
 
-    /// The signature batchers/renderers pass to begin() so their pipelines match
-    /// this target's formats + sample count.
-    pub fn passSignature(self: Framebuffer) PassSignature {
-        var sig = PassSignature{
-            .color_count = 1,
-            .depth_format = self.depth_format,
-            .sample_count = self.sample_count,
-        };
-        sig.color_formats[0] = self.color_format;
-        return sig;
-    }
-
     /// A Texture wrapper around the sampleable result, for drawing the FBO's
     /// output through the SpriteBatch (post-processing).
     pub fn asTexture(self: Framebuffer) Texture {
@@ -148,13 +150,46 @@ pub const Framebuffer = struct {
         };
     }
 
+    /// The signature batchers/renderers pass to begin() so their pipelines match
+    /// this target's formats + sample count.
+    pub fn passSignature(self: Framebuffer) PassSignature {
+        var sig = PassSignature{
+            .color_count = 1,
+            .depth_format = self.depth_format,
+            .sample_count = self.sample_count,
+        };
+        sig.color_formats[0] = self.color_format;
+        return sig;
+    }
+
+    /// This framebuffer's signature, with the depth format overridden — for passes
+    /// that attach an EXTERNAL depth buffer (deferred sub-passes use the G-buffer's,
+    /// while this framebuffer itself declares .NONE in deferred mode).
+    pub fn passSignatureWith(self: Framebuffer, depth_format: sg.PixelFormat) PassSignature {
+        var sig = self.passSignature();
+        sig.depth_format = depth_format;
+        return sig;
+    }
+
     /// Build the sokol Pass that targets this framebuffer. When MSAA, the
     /// resolve attachment is wired so sokol resolves at endPass automatically.
     pub fn pass(self: Framebuffer, action: sg.PassAction) sg.Pass {
+        return self.passWith(.{ .action = action });
+    }
+
+    /// Build the sokol Pass for this framebuffer, with optional depth override and
+    /// resolve control. Handles the MSAA resolve attachment so callers can't forget.
+    pub fn passWith(self: Framebuffer, opts: PassOptions) sg.Pass {
         var att = sg.Attachments{};
         att.colors[0] = self.color_view;
-        if (self.sample_count > 1) att.resolves[0] = self.resolve_view;
-        if (self.depth_img.id != 0) att.depth_stencil = self.depth_view;
-        return .{ .action = action, .attachments = att };
+        if (self.sample_count > 1 and opts.resolve) att.resolves[0] = self.resolve_view;
+
+        if (opts.depth_view) |dv| {
+            att.depth_stencil = dv;
+        } else if (self.depth_img.id != 0) {
+            att.depth_stencil = self.depth_view;
+        }
+
+        return .{ .action = opts.action, .attachments = att };
     }
 };

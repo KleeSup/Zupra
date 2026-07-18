@@ -146,6 +146,16 @@ pub fn render() void {
         scene.setAAMethod(.fxaa);
         scene.setRenderScale(2);
         std.debug.print("Switched to: BOTH\n", .{});
+    } else if (zupra.input.isKeyJustPressed(._0)) {
+        if (scene.mode == .forward) {
+            if (scene.msaa_samples == 1) {
+                scene.setMsaa(4);
+                std.debug.print("Switched MSAA: ON\n", .{});
+            } else {
+                scene.setMsaa(1);
+                std.debug.print("Switched MSAA: OFF\n", .{});
+            }
+        }
     }
 
     const now = sokol.time.now();

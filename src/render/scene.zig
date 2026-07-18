@@ -306,10 +306,13 @@ pub const SceneRenderer = struct {
         action.colors[0] = .{ .load_action = .LOAD };
         action.depth = .{ .load_action = .LOAD };
 
-        var sig = PassSignature{ .color_count = 1, .depth_format = .DEPTH, .sample_count = 1 };
-        sig.color_formats[0] = self.scene_color.color_format;
-
-        zupra.beginDrawingPass(.{ .action = action, .attachments = att });
+        zupra.beginDrawingPass(self.scene_color.passWith(.{
+            .action = action,
+            .depth_view = self.opaqueDepthView(),
+            // .resolve defaults to true — final pass, so this is the one that
+            // resolves MSAA into the image the post chain samples.
+        }));
+        const sig = self.scene_color.passSignatureWith(.DEPTH);
 
         // Sky first (fills background; geometry occludes it via depth test).
         if (self.skybox) |*sky| sky.render(self.camera, sig);
@@ -329,21 +332,29 @@ pub const SceneRenderer = struct {
         zupra.endDrawing();
     }
 
+    fn opaqueDepthView(self: SceneRenderer) sg.View {
+        return switch (self.mode) {
+            .deferred => self.gbuffer.depth_view,
+            .forward => self.scene_color.depth_view,
+        };
+    }
+
     fn flushForwardOpaque(self: *SceneRenderer) void {
         if (self.forward_opaque.items.len == 0) return;
-
-        var att = sg.Attachments{};
-        att.colors[0] = self.scene_color.color_view;
-        att.depth_stencil = self.gbuffer.depth_view;
 
         var action = sg.PassAction{};
         action.colors[0] = .{ .load_action = .LOAD };
         action.depth = .{ .load_action = .LOAD };
 
-        var sig = PassSignature{ .color_count = 1, .depth_format = .DEPTH, .sample_count = 1 };
-        sig.color_formats[0] = self.scene_color.color_format;
+        // Not the final pass into scene_color (composite still follows), so skip the
+        // MSAA resolve here — composite's resolve captures everything.
+        zupra.beginDrawingPass(self.scene_color.passWith(.{
+            .action = action,
+            .depth_view = self.opaqueDepthView(),
+            .resolve = false,
+        }));
 
-        zupra.beginDrawingPass(.{ .action = action, .attachments = att });
+        const sig = self.scene_color.passSignatureWith(.DEPTH);
         self.forward.beginEx(self.camera, self.env, sig);
         for (self.forward_opaque.items) |e| {
             self.forward.draw(e.mesh, e.model, e.material);
