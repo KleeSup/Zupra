@@ -27,6 +27,13 @@ pub fn build(b: *Build) !void {
 
     // == Root Module ==
 
+    const shaders_mod = b.createModule(.{
+        .root_source_file = b.path("shaders/shaders.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "sokol", .module = dep_sokol.module("sokol") }},
+    });
+
     const root_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -36,12 +43,7 @@ pub fn build(b: *Build) !void {
             .{ .name = "zstbi", .module = zstbi.module("root") },
             .{ .name = "zmesh", .module = zmesh.module("root") },
             .{ .name = "zmath", .module = zmath.module("root") },
-            .{ .name = "shaders", .module = b.createModule(.{
-                .root_source_file = b.path("shaders/shaders.zig"),
-                .target = target,
-                .optimize = optimize,
-                .imports = &.{.{ .name = "sokol", .module = dep_sokol.module("sokol") }},
-            }) },
+            .{ .name = "shaders", .module = shaders_mod },
         },
     });
 
@@ -53,7 +55,8 @@ pub fn build(b: *Build) !void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "zupra", .module = root_mod },
-            .{ .name = "sokol", .module = dep_sokol.module("sokol") }, // make sokol available for examples/assets/shaders/
+            .{ .name = "sokol", .module = dep_sokol.module("sokol") },
+            .{ .name = "shaders", .module = shaders_mod },
         },
     });
 
@@ -138,6 +141,11 @@ pub fn build(b: *Build) !void {
 
     try compileShaders(b, compile_step, dep_sokol, "shaders");
     try compileShaders(b, compile_step, dep_sokol, "examples/assets/shaders");
+    // Expose include shaders to the outside.
+    const shader_includes = b.addNamedWriteFiles("shader-includes");
+    _ = shader_includes.addCopyFile(b.path("shaders/material_surface.glsl.inc"), "material_surface.glsl.inc");
+    _ = shader_includes.addCopyFile(b.path("shaders/pbr_lib.glsl.inc"), "pbr_lib.glsl.inc");
+
     bakeBrdfLut(b, &target, compile_step);
 }
 
@@ -169,6 +177,8 @@ fn buildWeb(b: *Build, lib: *std.Build.Step.Compile, root: *Build.Module, dep_so
     run.step.dependOn(&link_step.step);
     b.step("run", "Run engine").dependOn(&run.step);
 }
+
+// --- shaders ---
 
 fn compileShaders(b: *Build, compile_step: *std.Build.Step.Compile, dep_sokol: *Build.Dependency, shader_dir_path: []const u8) !void {
     const dep_shdc = dep_sokol.builder.dependency("shdc", .{});
@@ -223,6 +233,36 @@ fn compileShaders(b: *Build, compile_step: *std.Build.Step.Compile, dep_sokol: *
         }
     }
 }
+
+pub const ShaderOptions = struct {
+    source: std.Build.LazyPath,
+    /// Output name, e.g. "hologram.glsl.zig"
+    name: []const u8,
+};
+
+/// Compile a user shader against Zupra's shader includes. Returns the generated
+/// .glsl.zig LazyPath, ready to hand to b.createModule.
+pub fn addShader(
+    b: *std.Build,
+    zupra_dep: *std.Build.Dependency,
+    shdc: *std.Build.Step.Run, // your existing shdc run step factory
+    opts: ShaderOptions,
+) std.Build.LazyPath {
+    const stage = b.addWriteFiles();
+    // Zupra's includes first, then the user's shader alongside them.
+    _ = stage.addCopyDirectory(zupra_dep.namedLazyPath("shader-includes"), "", .{});
+    const staged_src = stage.addCopyFile(opts.source, b.fmt("{s}", .{std.fs.path.basename(opts.source.getDisplayName())}));
+
+    const run = b.addRunArtifact(shdc);
+    run.addArg("--input");
+    run.addFileArg(staged_src);
+    run.addArg("--output");
+    const out = run.addOutputFileArg(opts.name);
+    run.addArgs(&.{ "--slang", "hlsl5:glsl430:metal_macos:wgsl", "--format", "sokol_zig" });
+    return out;
+}
+
+// --- pbr baking ---
 
 fn bakeBrdfLut(b: *Build, target: *const Build.ResolvedTarget, compile_step: *Build.Step.Compile) void {
     // BRDF LUT bake

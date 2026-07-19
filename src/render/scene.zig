@@ -109,7 +109,7 @@ pub const SceneRenderer = struct {
             .post = undefined,
         };
         self.scene_color = self.makeSceneColor(mode, width, height);
-        self.post = PostChain.init(cache, width, height, self.clear_color);
+        self.post = PostChain.init(allocator, cache, width, height, self.clear_color);
         // Forward renderer exists in BOTH modes: forward mode uses it for
         // opaque, and both modes use it to forward-shade transparents.
         self.forward = MeshRenderer.init(cache);
@@ -230,6 +230,7 @@ pub const SceneRenderer = struct {
         const model = inst.model;
         for (model.meshes, 0..) |submesh, i| {
             const material = model.materials[model.mesh_material[i]];
+
             if (material.alpha_mode == .blend) {
                 self.transparent.append(self.allocator, .{
                     .mesh = submesh,
@@ -246,10 +247,11 @@ pub const SceneRenderer = struct {
     fn drawOpaque(self: *SceneRenderer, mesh: Mesh, model: Matrix, material: Material) void {
         switch (self.mode) {
             .deferred => {
-                if (material.shading == .pbr) {
+                if (material.shading == .pbr and !material.requiresForward()) {
                     self.geo.drawMesh(mesh, model, material); // G-buffer (PBR lighting)
                 } else {
-                    // Forward-shaded after the lighting pass (respects shading model).
+                    // Forward-shaded after the lighting pass (respects shading model,
+                    // and custom shaders that don't write the G-buffer layout).
                     self.forward_opaque.append(self.allocator, .{
                         .mesh = mesh,
                         .model = model,
@@ -286,7 +288,11 @@ pub const SceneRenderer = struct {
         self.composite();
 
         // Present: tonemap scene-color (HDR) onto the swapchain.
-        self.post.present(self.scene_color.asTexture());
+        const depth: ?zupra.graphics.texture.Texture = switch (self.mode) {
+            .deferred => self.gbuffer.depthTexture(),
+            .forward => null, // forward depth isn't sampleable yet
+        };
+        self.post.present(self.scene_color.asTexture(), depth);
     }
 
     fn composite(self: *SceneRenderer) void {

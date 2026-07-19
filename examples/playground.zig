@@ -45,6 +45,13 @@ var model_queue: std.ArrayList(Model) = .empty;
 var last_ticks: u64 = 0;
 var t: f32 = 0;
 
+const holo_shader = @import("shaders").test_hologram;
+var holo_prog: zupra.graphics.ShaderProgram = undefined;
+
+const chroma_shader = @import("assets/shaders/grade.glsl.zig");
+var program: zupra.graphics.ShaderProgram = undefined;
+var effect: *zupra.render.PostEffect = undefined;
+
 pub fn main(ctx: std.process.Init) !void {
     gpa = ctx.gpa;
     zupra.init(ctx, .{ .initFn = init, .renderFn = render, .deinitFn = deinit, .eventFn = onEvent });
@@ -62,6 +69,23 @@ pub fn init() void {
     batch = zupra.render.SpriteBatch.init(gpa, &cache, .{}) catch unreachable;
     ui_cam = Camera2D.init(1280, 720);
     text = zupra.render.TextBatch2D.init(&font, &batch);
+
+    program = zupra.graphics.ShaderProgram.init(chroma_shader.gradeShaderDesc, .{
+        .layout = .fullscreen,
+        .slots = .{ .fs_params = chroma_shader.UB_fs_params },
+    });
+
+    effect = scene.post.addEffect(.{ .shader = program, .point = .ldr, .name = "chromatic" }) catch unreachable;
+    effect.setUniforms(chroma_shader.FsParams{
+        .tone = .{ 1.0, 1.0, 0.0, 0.0 }, // exposure, contrast, saturation=0 → greyscale
+        .tint = .{ 1, 1, 1, 0.6 },
+    });
+
+    holo_prog = zupra.graphics.ShaderProgram.init(holo_shader.hologramShaderDesc, .{
+        .layout = .mesh,
+        .slots = .{ .fs_params = holo_shader.UB_fs_params },
+        // no uv_params: this shader doesn't declare one
+    });
 
     const bricks = zupra.graphics.texture.Texture.initBuffer(@embedFile("assets/bricks/Bricks097_1K-JPG_Color.jpg")) catch unreachable;
     const bricks_normal = zupra.graphics.texture.Texture.initBuffer(@embedFile("assets/bricks/Bricks097_1K-JPG_NormalGL.jpg")) catch unreachable;
@@ -114,8 +138,13 @@ pub fn init() void {
     }) catch unreachable;
 
     helmet_model = zupra.render.gltf.loadMemory(gpa, @embedFile("assets/models/CarConcept.glb")) catch unreachable;
-    for (helmet_model.materials) |*mat| {
-        mat.shading = .pbr;
+    for (helmet_model.materials) |*m| {
+        m.shader = holo_prog;
+        m.alpha_mode = .blend; // it outputs alpha, so it wants blending
+        m.setShaderUniforms(holo_shader.FsParams{
+            .tint = .{ 0.2, 0.9, 1.0, 0.85 },
+            .params = .{ 3.0, 18.0, 2.0, 0.0 },
+        });
     }
 
     // Lighting: a warm sun + a colored point light.
@@ -161,6 +190,13 @@ pub fn render() void {
     const now = sokol.time.now();
     t += @floatCast(sokol.time.sec(sokol.time.diff(now, last_ticks)));
     last_ticks = now;
+
+    for (helmet_model.materials) |*m| {
+        m.setShaderUniforms(holo_shader.FsParams{
+            .tint = .{ 0.2, 0.9, 1.0, 0.85 },
+            .params = .{ 3.0, 18.0, 2.0, t },
+        });
+    }
 
     var floor = floor_model.instance();
     floor.setPosition(.{ .x = 0, .y = -0.7, .z = 0 });
@@ -224,6 +260,7 @@ pub fn deinit() void {
     glass_model.deinit();
     wall_model.deinit();
     helmet_model.deinit();
+    program.deinit();
     scene.deinit();
     cache.deinit();
 }

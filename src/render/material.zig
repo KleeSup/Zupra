@@ -20,10 +20,12 @@ const sg = @import("sokol").gfx;
 const tex = @import("../graphics/texture.zig");
 const pipeline = @import("../graphics/pipeline.zig");
 const zupra = @import("../root.zig");
+const shader = @import("../graphics/shader.zig");
 
 const Texture = tex.Texture;
 const Color = zupra.Color;
 const BlendMode = pipeline.BlendMode;
+const ShaderProgram = shader.ShaderProgram;
 
 // --- framework default textures (lazy 1x1, created after sg.setup) ---
 
@@ -70,6 +72,8 @@ pub fn deinitDefaults() void {
 }
 
 // --- material ---
+
+pub const max_material_uniform_bytes = 256;
 
 /// How a surface is shaded. Lets you opt out of PBR for stylized/low-poly
 /// work without losing access to it elsewhere.
@@ -156,6 +160,11 @@ pub const Material = struct {
 
     shading: ShadingModel = .pbr,
 
+    shader: ?ShaderProgram = null,
+    shader_writes_gbuffer: bool = false,
+    shader_uniforms: [max_material_uniform_bytes]u8 = undefined,
+    shader_uniform_len: usize = 0,
+
     pub fn usesUv1(self: Material, comptime map_: comptime_int) bool {
         return (self.uv_set & (@as(u8, 1) << map_)) != 0;
     }
@@ -184,5 +193,21 @@ pub const Material = struct {
             .blend => .alpha,
             else => .none, // opaque and mask both write opaque, then mask discards in shader
         };
+    }
+
+    // --- shader ---
+
+    /// Upload parameters for the custom shader's fs_params block. Pass the
+    /// generated FsParams struct from your shader's .glsl.zig.
+    pub fn setShaderUniforms(self: *Material, params: anytype) void {
+        const bytes = std.mem.asBytes(&params);
+        std.debug.assert(bytes.len <= max_material_uniform_bytes);
+        @memcpy(self.shader_uniforms[0..bytes.len], bytes);
+        self.shader_uniform_len = bytes.len;
+    }
+
+    /// True when this material must take the forward path regardless of mode.
+    pub fn requiresForward(self: Material) bool {
+        return self.shader != null and !self.shader_writes_gbuffer;
     }
 };

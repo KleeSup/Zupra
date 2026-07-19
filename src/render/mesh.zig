@@ -214,7 +214,7 @@ pub const MeshRenderer = struct {
         std.debug.assert(self.active);
 
         // Pick the shader for this material's shading model.
-        const shader: ShaderProgram = switch (material.shading) {
+        const shader: ShaderProgram = material.shader orelse switch (material.shading) {
             .pbr => self.shaders.pbr,
             .lambert => self.shaders.lambert,
             .unlit => self.shaders.unlit,
@@ -222,7 +222,8 @@ pub const MeshRenderer = struct {
 
         const key = PipelineKey{
             .shader = shader.handle,
-            .layout = if (material.shading == .unlit) .mesh_unlit else .mesh,
+            .layout = if (material.shader) |s| s.layout else if (material.shading == .unlit) .mesh_unlit else .mesh,
+
             .index_type = mesh.index_type,
             .pass = self.pass,
             .primitive = .TRIANGLES,
@@ -258,68 +259,96 @@ pub const MeshRenderer = struct {
         var unlit_fs: UnlitFs = undefined;
         const mat_smp = material.sampler orelse self.material_sampler;
 
-        switch (material.shading) {
-            .unlit => {
-                bindings.views[shd_unlit.VIEW_base_color_map] = material.map(.base_color).view;
-                bindings.views[shd_unlit.VIEW_emissive_map] = material.map(.emissive).view;
-                bindings.samplers[shd_unlit.SMP_smp_material] = mat_smp;
-                unlit_fs = .{
-                    .base_color = .{ bc.r, bc.g, bc.b, bc.a },
-                    .emissive = .{ emc.r, emc.g, emc.b, es },
-                };
-            },
-            .lambert => {
-                bindings.views[shd_lambert.VIEW_normal_map] = material.map(.normal).view;
-                bindings.views[shd_lambert.VIEW_base_color_map] = material.map(.base_color).view;
-                bindings.views[shd_lambert.VIEW_emissive_map] = material.map(.emissive).view;
-                bindings.samplers[shd_lambert.SMP_smp_material] = mat_smp;
-                lambert_fs = .{
-                    .base_color = .{ bc.r, bc.g, bc.b, bc.a },
-                    .material = .{ 0, 0, 0, if (material.normal_flip_y) -material.normal_scale else material.normal_scale },
-                    .emissive = .{ emc.r, emc.g, emc.b, es },
-                    .lights = self.lights,
-                };
-            },
-            .pbr => {
-                bindings.views[shd.VIEW_irradiance_map] = self.ibl_irradiance;
-                bindings.views[shd.VIEW_prefilter_map] = self.ibl_prefilter;
-                bindings.views[shd.VIEW_brdf_lut] = self.ibl_brdf_lut;
-                bindings.samplers[shd.SMP_smp_cube] = self.ibl_sampler;
-                bindings.views[shd.VIEW_normal_map] = material.map(.normal).view;
-                bindings.views[shd.VIEW_base_color_map] = material.map(.base_color).view;
-                bindings.views[shd.VIEW_emissive_map] = material.map(.emissive).view;
-                bindings.views[shd.VIEW_metallic_roughness_map] = material.map(.metallic_roughness).view;
-                bindings.views[shd.VIEW_occlusion_map] = material.map(.occlusion).view;
-                bindings.samplers[shd.SMP_smp_material] = mat_smp;
-                pbr_fs = .{
-                    .base_color = .{ bc.r, bc.g, bc.b, bc.a },
-                    .material = .{ material.metallic, material.roughness, material.occlusion_strength, if (material.normal_flip_y) -material.normal_scale else material.normal_scale },
-                    .emissive = .{ emc.r, emc.g, emc.b, es },
-                    .lights = self.lights,
-                };
-            },
+        if (material.shader != null) {
+            // Custom shader: the contract is MapSlot order, so bind by enum index.
+            // material_surface.glsl.inc declares these at matching binding= slots.
+            inline for (std.meta.fields(material_mod.MapSlot)) |f| {
+                const slot: material_mod.MapSlot = @enumFromInt(f.value);
+                bindings.views[f.value] = material.map(slot).view;
+            }
+            bindings.samplers[0] = mat_smp;
+        } else {
+            switch (material.shading) {
+                .unlit => {
+                    bindings.views[shd_unlit.VIEW_base_color_map] = material.map(.base_color).view;
+                    bindings.views[shd_unlit.VIEW_emissive_map] = material.map(.emissive).view;
+                    bindings.samplers[shd_unlit.SMP_smp_material] = mat_smp;
+                    unlit_fs = .{
+                        .base_color = .{ bc.r, bc.g, bc.b, bc.a },
+                        .emissive = .{ emc.r, emc.g, emc.b, es },
+                    };
+                },
+                .lambert => {
+                    bindings.views[shd_lambert.VIEW_normal_map] = material.map(.normal).view;
+                    bindings.views[shd_lambert.VIEW_base_color_map] = material.map(.base_color).view;
+                    bindings.views[shd_lambert.VIEW_emissive_map] = material.map(.emissive).view;
+                    bindings.samplers[shd_lambert.SMP_smp_material] = mat_smp;
+                    lambert_fs = .{
+                        .base_color = .{ bc.r, bc.g, bc.b, bc.a },
+                        .material = .{ 0, 0, 0, if (material.normal_flip_y) -material.normal_scale else material.normal_scale },
+                        .emissive = .{ emc.r, emc.g, emc.b, es },
+                        .lights = self.lights,
+                    };
+                },
+                .pbr => {
+                    bindings.views[shd.VIEW_irradiance_map] = self.ibl_irradiance;
+                    bindings.views[shd.VIEW_prefilter_map] = self.ibl_prefilter;
+                    bindings.views[shd.VIEW_brdf_lut] = self.ibl_brdf_lut;
+                    bindings.samplers[shd.SMP_smp_cube] = self.ibl_sampler;
+                    bindings.views[shd.VIEW_normal_map] = material.map(.normal).view;
+                    bindings.views[shd.VIEW_base_color_map] = material.map(.base_color).view;
+                    bindings.views[shd.VIEW_emissive_map] = material.map(.emissive).view;
+                    bindings.views[shd.VIEW_metallic_roughness_map] = material.map(.metallic_roughness).view;
+                    bindings.views[shd.VIEW_occlusion_map] = material.map(.occlusion).view;
+                    bindings.samplers[shd.SMP_smp_material] = mat_smp;
+                    pbr_fs = .{
+                        .base_color = .{ bc.r, bc.g, bc.b, bc.a },
+                        .material = .{ material.metallic, material.roughness, material.occlusion_strength, if (material.normal_flip_y) -material.normal_scale else material.normal_scale },
+                        .emissive = .{ emc.r, emc.g, emc.b, es },
+                        .lights = self.lights,
+                    };
+                },
+            }
         }
 
         sg.applyPipeline(pip);
         sg.applyBindings(bindings);
-        sg.applyUniforms(shader.slots.vs_params, sg.asRange(&vs));
 
-        switch (material.shading) {
-            .unlit => {
-                sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&unlit_fs));
+        if (material.shader) |prog| {
+            // vs_params is universal -> every mesh shader needs the transforms.
+            sg.applyUniforms(prog.slots.vs_params, sg.asRange(&vs));
+
+            if (prog.slots.uv_params) |slot| {
                 var uvp = uvParams(material);
-                sg.applyUniforms(shd_unlit.UB_uv_params, sg.asRange(&uvp));
-            },
-            .lambert => {
-                sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&lambert_fs));
-                var uvp = uvParams(material);
-                sg.applyUniforms(shd_lambert.UB_uv_params, sg.asRange(&uvp));
-            },
-            .pbr => {
-                sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&pbr_fs));
-                var uvp = uvParams(material);
-                sg.applyUniforms(shd.UB_uv_params, sg.asRange(&uvp));
-            },
+                sg.applyUniforms(slot, sg.asRange(&uvp));
+            }
+            if (prog.slots.fs_params) |slot| {
+                if (material.shader_uniform_len > 0) {
+                    sg.applyUniforms(slot, sg.asRange(material.shader_uniforms[0..material.shader_uniform_len]));
+                } else {
+                    std.log.err("Material custom shader has no uniforms set. Be sure to call setShaderUniforms()!", .{});
+                    return; // skip the draw rather than let sokol panic
+                }
+            }
+        } else {
+            sg.applyUniforms(shader.slots.vs_params, sg.asRange(&vs));
+            switch (material.shading) {
+                .unlit => {
+                    sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&unlit_fs));
+                    var uvp = uvParams(material);
+                    sg.applyUniforms(shd_unlit.UB_uv_params, sg.asRange(&uvp));
+                },
+                .lambert => {
+                    sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&lambert_fs));
+                    var uvp = uvParams(material);
+                    sg.applyUniforms(shd_lambert.UB_uv_params, sg.asRange(&uvp));
+                },
+                .pbr => {
+                    sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&pbr_fs));
+                    var uvp = uvParams(material);
+                    sg.applyUniforms(shd.UB_uv_params, sg.asRange(&uvp));
+                },
+            }
         }
 
         sg.draw(0, mesh.index_count, 1);

@@ -31,6 +31,8 @@ pub const Slots = struct {
     vs_params: u32 = 0,
     /// Set once the SpriteBatch grows a fragment-uniform upload path.
     fs_params: ?u32 = null,
+    /// Per-map UV transform block. null = shader doesn't declare it.
+    uv_params: ?u32 = null,
 };
 
 pub const Options = struct {
