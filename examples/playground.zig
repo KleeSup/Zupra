@@ -1,9 +1,13 @@
 //! examples/playground.zig
 //!
-//! Full pipeline demo via SceneRenderer (deferred): PBR opaque geometry under a
-//! directional + point light, with a transparent sphere sweeping across in front
-//! to show sorted, depth-correct transparency. Switch .deferred -> .forward and
-//! everything still renders (Lambert instead of PBR), no other code change.
+//! CLUSTERED LIGHTING demo. A grid of PBR spheres under a dim sun plus MANY
+//! moving point lights - the thing a 16-light uniform array could never do.
+//! Lights orbit and bob so you can watch clustering track them live.
+//!
+//! Keys:
+//!   6   add 16 point lights      7   remove 16
+//!   8   toggle light motion
+//!   1..5  AA (raw / FXAA / FXAA-quality / SSAA / both)   0  AA off
 
 const std = @import("std");
 const zupra = @import("zupra");
@@ -13,228 +17,217 @@ const Model = zupra.render.Model;
 const Material = zupra.render.Material;
 const MeshBuilder = zupra.render.MeshBuilder;
 const Light = zupra.render.Light;
+const LightHandle = zupra.render.LightHandle;
 const Environment = zupra.render.Environment;
-const Texture = zupra.graphics.texture.Texture;
 const Camera2D = zupra.render.Camera2D;
 
 var gpa: std.mem.Allocator = undefined;
+
 var cache: zupra.graphics.pipeline.PipelineCache = undefined;
 var scene: zupra.render.SceneRenderer = undefined;
 var cam: zupra.render.Camera3D = undefined;
-var env: Environment = .{};
+var env: Environment = undefined;
 var controller: zupra.render.FirstPersonController = undefined;
+
 var font: zupra.render.Font = undefined;
 var batch: zupra.render.SpriteBatch = undefined;
 var ui_cam: Camera2D = undefined;
 var text: zupra.render.TextBatch2D = undefined;
 
+var floor_model: Model = undefined;
+var sphere_metal: Model = undefined;
+var sphere_rough: Model = undefined;
+
+const grid_x = 8;
+const grid_z = 8;
+const grid_spacing: f32 = 3.0;
+
+const PointMover = struct {
+    handle: LightHandle,
+    center: [3]f32,
+    radius: f32,
+    speed: f32,
+    phase: f32,
+    height: f32,
+    bob: f32,
+};
+var movers: std.ArrayList(PointMover) = .empty;
+var lights_move = true;
+var elapsed: f32 = 0;
+
+var rng = std.Random.DefaultPrng.init(0x9E3779B97F4A7C15);
+
 var fps_accum: f32 = 0;
 var fps_frames: u32 = 0;
-var fps_buf: [64]u8 = undefined;
+var fps_buf: [96]u8 = undefined;
 var fps_text: []const u8 = "";
 
-var floor_model: Model = undefined;
-var metal_model: Model = undefined;
-var rough_model: Model = undefined;
-var glass_model: Model = undefined;
-var wall_model: Model = undefined;
-var helmet_model: Model = undefined;
-
-var model_queue: std.ArrayList(Model) = .empty;
-
-var last_ticks: u64 = 0;
-var t: f32 = 0;
-
-const holo_shader = @import("shaders").test_hologram;
-var holo_prog: zupra.graphics.ShaderProgram = undefined;
-
-const chroma_shader = @import("assets/shaders/grade.glsl.zig");
-var program: zupra.graphics.ShaderProgram = undefined;
-var effect: *zupra.render.PostEffect = undefined;
-
 pub fn main(ctx: std.process.Init) !void {
-    gpa = ctx.gpa;
     zupra.init(ctx, .{ .initFn = init, .renderFn = render, .deinitFn = deinit, .eventFn = onEvent });
 }
 
+fn randF(lo: f32, hi: f32) f32 {
+    return lo + rng.random().float(f32) * (hi - lo);
+}
+
+fn randColor() zupra.Color {
+    return .{ .r = randF(0.2, 1.0), .g = randF(0.2, 1.0), .b = randF(0.2, 1.0), .a = 1 };
+}
+
+fn addMover() void {
+    const center = [3]f32{
+        randF(-grid_x * grid_spacing * 0.5, grid_x * grid_spacing * 0.5),
+        randF(1.0, 3.0),
+        randF(-grid_z * grid_spacing * 0.5, grid_z * grid_spacing * 0.5),
+    };
+    const handle = env.addLight(Light.point(
+        .{ .x = center[0], .y = center[1], .z = center[2] },
+        randColor(),
+        randF(8.0, 16.0),
+        randF(4.0, 7.0), // range = the clustering cull bound; keep it tight
+    )) catch return;
+
+    movers.append(gpa, .{
+        .handle = handle,
+        .center = center,
+        .radius = randF(1.5, 5.0),
+        .speed = randF(0.3, 1.2) * (if (rng.random().boolean()) @as(f32, 1) else -1),
+        .phase = randF(0, std.math.tau),
+        .height = center[1],
+        .bob = randF(0.3, 1.2),
+    }) catch {};
+}
+
+fn removeMovers(n: usize) void {
+    var i: usize = 0;
+    while (i < n and movers.items.len > 0) : (i += 1) {
+        const m = movers.pop().?;
+        env.removeLight(m.handle);
+    }
+}
+
 pub fn init() void {
+    gpa = zupra.getGPA();
     cache = .init(gpa);
     scene = zupra.render.SceneRenderer.init(gpa, &cache, .deferred, 1280, 720);
-    scene.setAAMethod(.none);
+    scene.setAAMethod(.fxaa);
 
     cam = zupra.render.Camera3D.init(16.0 / 9.0);
-    controller = .init(.{ .x = 0, .y = 0, .z = 0 });
+    controller = .init(.{ .x = 0, .y = 6, .z = -18 });
 
     font = zupra.render.Font.initFromMemory(gpa, @embedFile("assets/OpenSans-Regular.ttf"), .{}) catch unreachable;
     batch = zupra.render.SpriteBatch.init(gpa, &cache, .{}) catch unreachable;
     ui_cam = Camera2D.init(1280, 720);
     text = zupra.render.TextBatch2D.init(&font, &batch);
 
-    program = zupra.graphics.ShaderProgram.init(chroma_shader.gradeShaderDesc, .{
-        .layout = .fullscreen,
-        .slots = .{ .fs_params = chroma_shader.UB_fs_params },
-    });
+    // Environment now owns GPU resources (clustered light store), so it takes an
+    // allocator and must be passed by pointer, never copied.
+    env = Environment.init(gpa);
+    env.ambient = .{ .r = 0.02, .g = 0.02, .b = 0.03, .a = 1 };
 
-    effect = scene.post.addEffect(.{ .shader = program, .point = .ldr, .name = "chromatic" }) catch unreachable;
-    effect.setUniforms(chroma_shader.FsParams{
-        .tone = .{ 1.0, 1.0, 0.0, 0.0 }, // exposure, contrast, saturation=0 → greyscale
-        .tint = .{ 1, 1, 1, 0.6 },
-    });
+    // Dim sun so the point lights dominate.
+    _ = env.addLight(Light.directional(
+        .{ .x = -0.5, .y = -1.0, .z = -0.35 },
+        .{ .r = 1.0, .g = 0.96, .b = 0.9, .a = 1 },
+        0.6,
+    )) catch unreachable;
 
-    holo_prog = zupra.graphics.ShaderProgram.init(holo_shader.hologramShaderDesc, .{
-        .layout = .mesh,
-        .slots = .{ .fs_params = holo_shader.UB_fs_params },
-        // no uv_params: this shader doesn't declare one
-    });
-
-    const bricks = zupra.graphics.texture.Texture.initBuffer(@embedFile("assets/bricks/Bricks097_1K-JPG_Color.jpg")) catch unreachable;
-    const bricks_normal = zupra.graphics.texture.Texture.initBuffer(@embedFile("assets/bricks/Bricks097_1K-JPG_NormalGL.jpg")) catch unreachable;
-
-    wall_model = Model.fromMesh(gpa, MeshBuilder.cube(12, 3, 1), .{
-        .base_color_map = bricks,
-        .normal_map = bricks_normal,
-        .shading = .pbr,
+    floor_model = Model.fromMesh(gpa, MeshBuilder.plane(48, 48), .{
+        .base_color = .{ .r = 0.5, .g = 0.5, .b = 0.55, .a = 1 },
+        .metallic = 0.0,
         .roughness = 0.9,
+    }) catch unreachable;
+
+    sphere_metal = Model.fromMesh(gpa, MeshBuilder.sphere(gpa, 0.9, 32, 32) catch unreachable, .{
+        .base_color = .{ .r = 0.9, .g = 0.9, .b = 0.9, .a = 1 },
+        .metallic = 1.0,
+        .roughness = 0.25,
+    }) catch unreachable;
+    sphere_rough = Model.fromMesh(gpa, MeshBuilder.sphere(gpa, 0.9, 32, 32) catch unreachable, .{
+        .base_color = .{ .r = 0.8, .g = 0.3, .b = 0.3, .a = 1 },
         .metallic = 0.0,
-        .uv_scale = .{ 6, 2 },
+        .roughness = 0.6,
     }) catch unreachable;
 
-    // Floor: large rough dielectric plane.
-    floor_model = Model.fromMesh(gpa, MeshBuilder.plane(24, 24), .{
-        .base_color = .{ .r = 1, .g = 1, .b = 1, .a = 1 },
-    }) catch unreachable;
-
-    const albedo = Texture.initBuffer(@embedFile("assets/metal/Metal049A_1K-JPG_Color.jpg")) catch unreachable;
-    const normal = Texture.initBuffer(@embedFile("assets/metal/Metal049A_1K-JPG_NormalGL.jpg")) catch unreachable;
-    const mr = zupra.graphics.texture.packMetallicRoughness(
-        gpa,
-        @embedFile("assets/metal/Metal049A_1K-JPG_Roughness.jpg"),
-        @embedFile("assets/metal/Metal049A_1K-JPG_Metalness.jpg"),
-    ) catch unreachable;
-
-    metal_model = Model.fromMesh(gpa, MeshBuilder.sphere(gpa, 1.0, 48, 48) catch unreachable, .{
-        .base_color = .{ .r = 1, .g = 1, .b = 1, .a = 1 },
-        .metallic = 1.0, // factor × map.b
-        .roughness = 1.0, // factor × map.g (use 1.0 so the map drives it)
-        .base_color_map = albedo,
-        .normal_map = normal,
-        .metallic_roughness_map = mr,
-        // normal_flip_y = false,  // GL convention — default; flip to true if bumps invert
-    }) catch unreachable;
-
-    // Rough dielectric sphere.
-    rough_model = Model.fromMesh(gpa, MeshBuilder.sphere(gpa, 0.7, 48, 48) catch unreachable, .{
-        .base_color = .{ .r = 0.85, .g = 0.25, .b = 0.2, .a = 1 },
-        .metallic = 0.0,
-        .roughness = 0.65,
-    }) catch unreachable;
-
-    // Transparent sphere (routes to the sorted forward transparent pass).
-    glass_model = Model.fromMesh(gpa, MeshBuilder.sphere(gpa, 0.8, 48, 48) catch unreachable, .{
-        .base_color = .{ .r = 0.4, .g = 0.7, .b = 1.0, .a = 0.4 },
-        .metallic = 0.0,
-        .roughness = 0.1,
-        .alpha_mode = .blend,
-    }) catch unreachable;
-
-    helmet_model = zupra.render.gltf.loadMemory(gpa, @embedFile("assets/models/CarConcept.glb")) catch unreachable;
-    for (helmet_model.materials) |*m| {
-        m.shader = holo_prog;
-        m.alpha_mode = .blend; // it outputs alpha, so it wants blending
-        m.setShaderUniforms(holo_shader.FsParams{
-            .tint = .{ 0.2, 0.9, 1.0, 0.85 },
-            .params = .{ 3.0, 18.0, 2.0, 0.0 },
-        });
-    }
-
-    // Lighting: a warm sun + a colored point light.
-    env = .{ .ambient = .{ .r = 0.03, .g = 0.03, .b = 0.04, .a = 1 } };
-    env.addLight(Light.directional(.{ .x = -0.5, .y = -1.0, .z = -0.35 }, .{ .r = 1.0, .g = 0.96, .b = 0.9, .a = 1 }, 2.5));
-
-    last_ticks = sokol.time.now();
+    // 48 lights to start - already 3x the old fixed cap.
+    var i: usize = 0;
+    while (i < 48) : (i += 1) addMover();
 }
 
 pub fn render() void {
-    if (zupra.input.isKeyJustPressed(._1)) { // raw
+    const dt = zupra.app.getDelta();
+    if (lights_move) elapsed += dt;
+
+    if (zupra.input.isKeyJustPressed(._6)) {
+        var i: usize = 0;
+        while (i < 16) : (i += 1) addMover();
+    }
+    if (zupra.input.isKeyJustPressed(._7)) removeMovers(16);
+    if (zupra.input.isKeyJustPressed(._8)) lights_move = !lights_move;
+
+    if (zupra.input.isKeyJustPressed(._1)) {
         scene.setAAMethod(.none);
         scene.setRenderScale(1);
-        std.debug.print("Switched to: RAW\n", .{});
-    } else if (zupra.input.isKeyJustPressed(._2)) { // FXAA
+    } else if (zupra.input.isKeyJustPressed(._2)) {
         scene.setAAMethod(.fxaa);
         scene.setRenderScale(1);
-        std.debug.print("Switched to: FXAA\n", .{});
-    } else if (zupra.input.isKeyJustPressed(._3)) { // better FXAA
+    } else if (zupra.input.isKeyJustPressed(._3)) {
         scene.setAAMethod(.fxaa_quality);
         scene.setRenderScale(1);
-        std.debug.print("Switched to: FXAA_Q\n", .{});
-    } else if (zupra.input.isKeyJustPressed(._4)) { // 2x SSAA
+    } else if (zupra.input.isKeyJustPressed(._4)) {
         scene.setAAMethod(.none);
         scene.setRenderScale(2);
-        std.debug.print("Switched to: 2x SSAA\n", .{});
-    } else if (zupra.input.isKeyJustPressed(._5)) { // both
+    } else if (zupra.input.isKeyJustPressed(._5)) {
         scene.setAAMethod(.fxaa);
         scene.setRenderScale(2);
-        std.debug.print("Switched to: BOTH\n", .{});
     } else if (zupra.input.isKeyJustPressed(._0)) {
-        if (scene.mode == .forward) {
-            if (scene.msaa_samples == 1) {
-                scene.setMsaa(4);
-                std.debug.print("Switched MSAA: ON\n", .{});
-            } else {
-                scene.setMsaa(1);
-                std.debug.print("Switched MSAA: OFF\n", .{});
+        scene.setAAMethod(.none);
+        scene.setRenderScale(1);
+    }
+
+    // Orbit + bob each point light. Mutated via the stable handle.
+    if (lights_move) {
+        for (movers.items) |m| {
+            if (env.getLight(m.handle)) |l| {
+                const a = m.phase + elapsed * m.speed;
+                l.position = .{
+                    .x = m.center[0] + @cos(a) * m.radius,
+                    .y = m.height + @sin(elapsed * 1.7 + m.phase) * m.bob,
+                    .z = m.center[2] + @sin(a) * m.radius,
+                };
             }
         }
     }
 
-    const now = sokol.time.now();
-    t += @floatCast(sokol.time.sec(sokol.time.diff(now, last_ticks)));
-    last_ticks = now;
+    controller.update(dt);
+    controller.applyTo(&cam);
 
-    for (helmet_model.materials) |*m| {
-        m.setShaderUniforms(holo_shader.FsParams{
-            .tint = .{ 0.2, 0.9, 1.0, 0.85 },
-            .params = .{ 3.0, 18.0, 2.0, t },
-        });
-    }
+    scene.begin(cam, &env); // pointer
 
     var floor = floor_model.instance();
-    floor.setPosition(.{ .x = 0, .y = -0.7, .z = 0 });
-
-    var metal = metal_model.instance();
-    metal.setPosition(.{ .x = -1.8, .y = 0, .z = 0 });
-
-    var rough = rough_model.instance();
-    rough.setPosition(.{ .x = 0.2, .y = 0, .z = 0 });
-
-    // Glass sweeps left-right in front of the spheres.
-    var glass = glass_model.instance();
-    glass.setPosition(.{ .x = @sin(t * 0.6) * 2.5, .y = 0.1, .z = 2.2 });
-
-    var wall = wall_model.instance();
-    wall.setPosition(.{ .x = 0, .y = 0, .z = -6 });
-
-    var helmet = helmet_model.instance();
-    helmet.setPosition(.{ .x = 0, .y = 3, .z = 6 });
-
-    controller.update(zupra.app.getDelta());
-    controller.applyTo(&cam);
-    scene.begin(cam, env);
+    floor.setPosition(.{ .x = 0, .y = 0, .z = 0 });
     scene.draw(floor);
-    scene.draw(metal);
-    scene.draw(rough);
-    scene.draw(glass);
-    scene.draw(wall);
-    scene.draw(helmet);
+
+    var gz: usize = 0;
+    while (gz < grid_z) : (gz += 1) {
+        var gx: usize = 0;
+        while (gx < grid_x) : (gx += 1) {
+            const px = (@as(f32, @floatFromInt(gx)) - grid_x * 0.5 + 0.5) * grid_spacing;
+            const pz = (@as(f32, @floatFromInt(gz)) - grid_z * 0.5 + 0.5) * grid_spacing;
+            var inst = if ((gx + gz) & 1 == 0) sphere_metal.instance() else sphere_rough.instance();
+            inst.setPosition(.{ .x = px, .y = 1.0, .z = pz });
+            scene.draw(inst);
+        }
+    }
     scene.end();
 
-    // Debug
-    const dt = zupra.app.getDelta();
     fps_accum += dt;
     fps_frames += 1;
-    if (fps_accum >= 0.25) { // refresh 4x/sec
+    if (fps_accum >= 0.25) {
         const fps = @as(f32, @floatFromInt(fps_frames)) / fps_accum;
-        fps_text = std.fmt.bufPrint(&fps_buf, "{d:.0} FPS   {d:.2} ms", .{ fps, 1000.0 / fps }) catch "FPS ?";
+        fps_text = std.fmt.bufPrint(&fps_buf, "{d:.0} FPS  {d:.2} ms   lights: {d}   6/7=+/-16  8=pause", .{
+            fps, 1000.0 / fps, env.lightCount(),
+        }) catch "FPS ?";
         fps_accum = 0;
         fps_frames = 0;
     }
@@ -252,15 +245,13 @@ pub fn onEvent(event: *const zupra.Event) void {
 }
 
 pub fn deinit() void {
+    movers.deinit(gpa);
     font.deinit();
     batch.deinit(gpa);
     floor_model.deinit();
-    metal_model.deinit();
-    rough_model.deinit();
-    glass_model.deinit();
-    wall_model.deinit();
-    helmet_model.deinit();
-    program.deinit();
+    sphere_metal.deinit();
+    sphere_rough.deinit();
+    env.deinit();
     scene.deinit();
     cache.deinit();
 }

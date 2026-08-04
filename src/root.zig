@@ -121,7 +121,7 @@ pub fn getIo() std.Io {
 }
 
 pub fn getGPA() std.mem.Allocator {
-    return user_config.gpa;
+    return context.gpa;
 }
 
 pub fn getContext() std.process.Init {

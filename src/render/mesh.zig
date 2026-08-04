@@ -22,6 +22,7 @@ const gfx = @import("../graphics/graphics.zig");
 const pipeline = @import("../graphics/pipeline.zig");
 const math = @import("../math.zig");
 const material_mod = @import("material.zig");
+const lighting_mod = @import("lighting.zig");
 const Camera3D = @import("camera3d.zig").Camera3D;
 
 const shd = @import("shaders").mesh;
@@ -40,29 +41,14 @@ const Vec3 = math.Vec3;
 const Color = zupra.Color;
 const Material = material_mod.Material;
 const Light = @import("light.zig").Light;
-const LightParams = @import("light.zig").LightParams;
-const packLightParams = @import("light.zig").packLightParams;
 const Environment = @import("environment.zig").Environment;
 const ShadingModel = material_mod.ShadingModel;
 
 const VsParams = shd.VsParams;
 const UvParams = shd.UvParams;
-const PbrFs = extern struct {
-    base_color: [4]f32,
-    material: [4]f32, // metallic, roughness, ao, normal_scale
-    emissive: [4]f32, // rgb factor, w strength
-    lights: LightParams,
-};
-const LambertFs = extern struct {
-    base_color: [4]f32,
-    material: [4]f32, // w = normal_scale (x/y/z unused)
-    emissive: [4]f32,
-    lights: LightParams,
-};
-const UnlitFs = extern struct {
-    base_color: [4]f32,
-    emissive: [4]f32,
-};
+const PbrFs = shd.FsParams;
+const LambertFs = shd_lambert.FsParams;
+const UnlitFs = shd_unlit.FsParams;
 
 const ShaderSet = struct {
     pbr: ShaderProgram,
@@ -165,7 +151,7 @@ pub const MeshRenderer = struct {
     material_sampler: sg.Sampler,
 
     view_proj: Matrix = undefined,
-    lights: LightParams = undefined,
+    lighting: *lighting_mod.LightingFrame = undefined,
     active: bool = false,
 
     ibl_irradiance: sg.View = .{},
@@ -198,15 +184,15 @@ pub const MeshRenderer = struct {
         self.ibl_sampler = sampler;
     }
 
-    pub fn begin(self: *MeshRenderer, camera: Camera3D, env: Environment) void {
+    pub fn begin(self: *MeshRenderer, camera: Camera3D, env: *Environment) void {
         self.beginEx(camera, env, PassSignature.swapchainPass());
     }
 
-    pub fn beginEx(self: *MeshRenderer, camera: Camera3D, env: Environment, pass: PassSignature) void {
+    pub fn beginEx(self: *MeshRenderer, camera: Camera3D, env: *Environment, pass: PassSignature) void {
         std.debug.assert(!self.active);
         self.active = true;
         self.view_proj = camera.viewProjection();
-        self.lights = packLightParams(env.lights(), env.ambient, camera.position);
+        self.lighting = &env.lighting;
         self.pass = pass;
     }
 
@@ -283,11 +269,18 @@ pub const MeshRenderer = struct {
                     bindings.views[shd_lambert.VIEW_base_color_map] = material.map(.base_color).view;
                     bindings.views[shd_lambert.VIEW_emissive_map] = material.map(.emissive).view;
                     bindings.samplers[shd_lambert.SMP_smp_material] = mat_smp;
+
+                    self.lighting.bind(&bindings, .{
+                        .light_data = shd_lambert.VIEW_light_data,
+                        .cluster_table = shd_lambert.VIEW_cluster_table,
+                        .cluster_indices = shd_lambert.VIEW_cluster_indices,
+                        .sampler = shd_lambert.SMP_smp_data,
+                    });
+
                     lambert_fs = .{
                         .base_color = .{ bc.r, bc.g, bc.b, bc.a },
                         .material = .{ 0, 0, 0, if (material.normal_flip_y) -material.normal_scale else material.normal_scale },
                         .emissive = .{ emc.r, emc.g, emc.b, es },
-                        .lights = self.lights,
                     };
                 },
                 .pbr => {
@@ -301,11 +294,18 @@ pub const MeshRenderer = struct {
                     bindings.views[shd.VIEW_metallic_roughness_map] = material.map(.metallic_roughness).view;
                     bindings.views[shd.VIEW_occlusion_map] = material.map(.occlusion).view;
                     bindings.samplers[shd.SMP_smp_material] = mat_smp;
+
+                    self.lighting.bind(&bindings, .{
+                        .light_data = shd.VIEW_light_data,
+                        .cluster_table = shd.VIEW_cluster_table,
+                        .cluster_indices = shd.VIEW_cluster_indices,
+                        .sampler = shd.SMP_smp_data,
+                    });
+
                     pbr_fs = .{
                         .base_color = .{ bc.r, bc.g, bc.b, bc.a },
                         .material = .{ material.metallic, material.roughness, material.occlusion_strength, if (material.normal_flip_y) -material.normal_scale else material.normal_scale },
                         .emissive = .{ emc.r, emc.g, emc.b, es },
-                        .lights = self.lights,
                     };
                 },
             }
@@ -342,11 +342,15 @@ pub const MeshRenderer = struct {
                     sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&lambert_fs));
                     var uvp = uvParams(material);
                     sg.applyUniforms(shd_lambert.UB_uv_params, sg.asRange(&uvp));
+                    var lp = self.lighting.params();
+                    sg.applyUniforms(shd_lambert.UB_light_params, sg.asRange(&lp));
                 },
                 .pbr => {
                     sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&pbr_fs));
                     var uvp = uvParams(material);
                     sg.applyUniforms(shd.UB_uv_params, sg.asRange(&uvp));
+                    var lp = self.lighting.params();
+                    sg.applyUniforms(shd.UB_light_params, sg.asRange(&lp));
                 },
             }
         }
