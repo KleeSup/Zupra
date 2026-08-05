@@ -51,6 +51,10 @@ const Ibl = @import("ibl.zig").Ibl;
 const PostChain = @import("posprocess.zig").PostChain;
 const AAMethod = @import("posprocess.zig").AAMethod;
 
+const ShadowRenderer = @import("shadow_renderer.zig").ShadowRenderer;
+const ShadowParams = @import("shaders").mesh.ShadowParams;
+const shadow_max_cascades = @import("shadow_renderer.zig").max_cascades;
+
 pub const ShadingMode = enum { forward, deferred };
 
 const TransparentEntry = struct {
@@ -82,6 +86,10 @@ pub const SceneRenderer = struct {
     ibl: ?Ibl = null,
     ibl_baked: bool = false,
 
+    shadows: ShadowRenderer,
+    shadow_params: ShadowParams = undefined,
+    shadow_queue: std.ArrayList(ModelInstance) = .empty,
+
     // deferred-only
     gbuffer: GBuffer = undefined,
     geo: GeometryRenderer = undefined,
@@ -89,10 +97,17 @@ pub const SceneRenderer = struct {
 
     // forward-only
     forward: MeshRenderer = undefined,
-    forward_opaque: std.ArrayListUnmanaged(ForwardEntry) = .empty,
+    forward_opaque: std.ArrayList(ForwardEntry) = .empty,
+
+    // Opaque submissions for this frame. draw() records into this; end() replays
+    // it into whichever pass the mode calls for. Recording rather than drawing
+    // immediately is what lets the shadow depth passes -- which must run BEFORE
+    // the main geometry pass, yet need to know the frame's geometry -- see the
+    // whole scene.
+    opaque_queue: std.ArrayList(ForwardEntry) = .empty,
 
     // transparent draw queue (both modes); flushed sorted in the NEXT step
-    transparent: std.ArrayListUnmanaged(TransparentEntry) = .empty,
+    transparent: std.ArrayList(TransparentEntry) = .empty,
 
     // per-frame captured state
     camera: Camera3D = undefined,
@@ -107,6 +122,7 @@ pub const SceneRenderer = struct {
             .height = height,
             .scene_color = undefined,
             .post = undefined,
+            .shadows = ShadowRenderer.init(allocator, cache, .{}),
         };
         self.scene_color = self.makeSceneColor(mode, width, height);
         self.post = PostChain.init(allocator, cache, width, height, self.clear_color);
@@ -126,6 +142,7 @@ pub const SceneRenderer = struct {
     pub fn deinit(self: *SceneRenderer) void {
         self.transparent.deinit(self.allocator);
         self.forward_opaque.deinit(self.allocator);
+        self.opaque_queue.deinit(self.allocator);
         if (self.mode == .deferred) {
             self.lit.deinit();
             self.gbuffer.deinit();
@@ -136,6 +153,8 @@ pub const SceneRenderer = struct {
         self.scene_color.deinit();
         if (self.skybox) |*s| s.deinit();
         if (self.ibl) |*ibl| ibl.deinit();
+        self.shadows.deinit();
+        self.shadow_queue.deinit(self.allocator);
     }
 
     pub fn setRenderScale(self: *SceneRenderer, scale: u8) void {
@@ -193,6 +212,14 @@ pub const SceneRenderer = struct {
         self.env = env;
         self.transparent.clearRetainingCapacity();
         self.forward_opaque.clearRetainingCapacity();
+        self.opaque_queue.clearRetainingCapacity();
+        self.shadow_queue.clearRetainingCapacity();
+
+        // Caster SETUP runs here rather than in end() because it stamps a
+        // shadow_index onto each light, and beginFrame below bakes those indices
+        // into the light texture the shading pass reads. The depth passes
+        // themselves are issued from end(), once the geometry is known.
+        self.shadows.build(env.lighting.store.lights.items, self.camera);
 
         env.lighting.beginFrame(
             camera,
@@ -214,20 +241,13 @@ pub const SceneRenderer = struct {
             if (self.mode == .deferred)
                 self.lit.setIbl(ibl.irradianceView(), ibl.prefilterView(), ibl.brdfLutView(), ibl.cubeSampler());
         }
-
-        switch (self.mode) {
-            .deferred => {
-                zupra.beginDrawingPass(self.gbuffer.pass());
-                self.geo.begin(self.camera, self.gbuffer.passSignature());
-            },
-            .forward => {
-                zupra.beginDrawingFramebufferClear(self.scene_color, self.clear_color);
-                self.forward.beginEx(self.camera, self.env, self.scene_color.passSignature());
-            },
-        }
     }
 
+    /// Submit an instance for this frame. Nothing reaches the GPU here --
+    /// submission only records what to draw, and end() runs the passes in
+    /// dependency order.
     pub fn draw(self: *SceneRenderer, inst: ModelInstance) void {
+        self.shadow_queue.append(self.allocator, inst) catch {};
         const model_matrix = inst.modelMatrix();
         const dx = self.camera.position.x - inst.position.x;
         const dy = self.camera.position.y - inst.position.y;
@@ -246,8 +266,25 @@ pub const SceneRenderer = struct {
                     .depth = depth,
                 }) catch {};
             } else {
-                self.drawOpaque(submesh, model_matrix, material);
+                self.opaque_queue.append(self.allocator, .{
+                    .mesh = submesh,
+                    .model = model_matrix,
+                    .material = material,
+                }) catch {};
             }
+        }
+    }
+
+    pub fn drawShadowCasters(
+        self: *SceneRenderer,
+        shadows: *ShadowRenderer,
+        view_proj: Matrix,
+        bias: f32,
+        slope: f32,
+        sig: PassSignature,
+    ) void {
+        for (self.shadow_queue.items) |inst| {
+            shadows.drawModel(inst, view_proj, bias, slope, sig);
         }
     }
 
@@ -271,6 +308,32 @@ pub const SceneRenderer = struct {
     }
 
     pub fn end(self: *SceneRenderer) void {
+        // 1) Shadow depth passes. Every caster tile is filled before anything
+        // samples the atlas, and the queue they draw from is complete by now.
+        self.shadows.render(self);
+        self.shadow_params = packShadowParams(&self.shadows);
+        self.forward.setShadows(self.shadows.atlasView(), self.shadows.compareSampler(), &self.shadow_params);
+        if (self.mode == .deferred)
+            // ShadowParams is generated per shader, but mesh's and deferred's are
+            // byte-identical by construction (both come from the same block in
+            // pbr_lib.glsl.inc), so the cast is safe. A shared type would make
+            // that guarantee explicit rather than assumed.
+            self.lit.setShadows(self.shadows.atlasView(), self.shadows.compareSampler(), @ptrCast(&self.shadow_params));
+
+        // 2) Main geometry pass, replaying this frame's opaque submissions.
+        switch (self.mode) {
+            .deferred => {
+                zupra.beginDrawingPass(self.gbuffer.pass());
+                self.geo.begin(self.camera, self.gbuffer.passSignature());
+            },
+            .forward => {
+                zupra.beginDrawingFramebufferClear(self.scene_color, self.clear_color);
+                self.forward.beginEx(self.camera, self.env, self.scene_color.passSignature());
+            },
+        }
+        for (self.opaque_queue.items) |e| self.drawOpaque(e.mesh, e.model, e.material);
+
+        // 3) Resolve lighting and composite.
         switch (self.mode) {
             .deferred => {
                 self.geo.end();
@@ -376,3 +439,24 @@ pub const SceneRenderer = struct {
         zupra.endDrawing();
     }
 };
+
+fn packShadowParams(rend: *const ShadowRenderer) ShadowParams {
+    var p: ShadowParams = std.mem.zeroes(ShadowParams);
+    const data = rend.shadowData();
+    const MC = shadow_max_cascades;
+    for (data, 0..) |d, li| {
+        var c: usize = 0;
+        while (c < MC) : (c += 1) {
+            const o = (li * MC + c) * 4;
+            const m = d.view_proj[c]; // [16]f32, row order
+            p.sh_vp[o + 0] = .{ m[0], m[1], m[2], m[3] };
+            p.sh_vp[o + 1] = .{ m[4], m[5], m[6], m[7] };
+            p.sh_vp[o + 2] = .{ m[8], m[9], m[10], m[11] };
+            p.sh_vp[o + 3] = .{ m[12], m[13], m[14], m[15] };
+            p.sh_rect[li * MC + c] = d.rect[c];
+        }
+        p.sh_info[li] = d.params;
+        p.sh_split[li] = d.splits;
+    }
+    return p;
+}

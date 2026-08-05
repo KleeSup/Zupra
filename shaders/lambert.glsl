@@ -56,6 +56,9 @@ void main() {
 
 @fs fs
 #define MAX_DIRECTIONAL 4
+#define ZUPRA_SHADOWS
+#define MAX_CASCADES 4
+#define MAX_SHADOWED 16
 
 layout(binding=0) uniform texture2D normal_map;
 layout(binding=1) uniform texture2D base_color_map;
@@ -98,6 +101,18 @@ in vec2 v_uv1;
 in float v_view_depth;
 
 out vec4 frag_color;
+
+
+layout(binding=6) uniform texture2D shadow_atlas;
+@sampler_type smp_shadow comparison
+layout(binding=2) uniform samplerShadow smp_shadow;
+
+layout(binding=4) uniform shadow_params {
+    vec4 sh_vp[MAX_SHADOWED * MAX_CASCADES];
+    vec4 sh_rect[MAX_SHADOWED * MAX_CASCADES];
+    vec4 sh_info[MAX_SHADOWED];
+    vec4 sh_split[MAX_SHADOWED];
+};
 
 @include_block pbr_brdf
 @include_block pbr_lights

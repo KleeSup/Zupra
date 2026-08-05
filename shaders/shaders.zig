@@ -12,5 +12,6 @@ pub const lambert = @import("lambert.glsl.zig");
 pub const unlit = @import("unlit.glsl.zig");
 pub const fxaa = @import("fxaa.glsl.zig");
 pub const fxaa_quality = @import("fxaa_quality.glsl.zig");
+pub const shadow_depth = @import("shadow_depth.glsl.zig");
 
 pub const test_hologram = @import("hologram.glsl.zig");

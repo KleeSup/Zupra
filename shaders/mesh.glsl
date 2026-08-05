@@ -61,6 +61,10 @@ void main() {
 
 @fs fs
 #define MAX_DIRECTIONAL 4
+#define ZUPRA_SHADOWS
+#define ZUPRA_SHADOW_DEBUG
+#define MAX_CASCADES 4
+#define MAX_SHADOWED 16
 
 layout(binding=0) uniform textureCube irradiance_map;
 layout(binding=1) uniform textureCube prefilter_map;
@@ -109,6 +113,19 @@ in vec2 v_uv1;
 in float v_view_depth;
 
 out vec4 frag_color;
+
+
+@image_sample_type shadow_atlas depth
+layout(binding=11) uniform texture2D shadow_atlas;
+@sampler_type smp_shadow comparison
+layout(binding=3) uniform samplerShadow smp_shadow;
+
+layout(binding=4) uniform shadow_params {
+    vec4 sh_vp[MAX_SHADOWED * MAX_CASCADES];   // mat4 as 4 rows each
+    vec4 sh_rect[MAX_SHADOWED * MAX_CASCADES]; // atlas rect per cascade
+    vec4 sh_info[MAX_SHADOWED];                // cascades, pcf, normal bias, texel
+    vec4 sh_split[MAX_SHADOWED];               // cascade far splits
+};
 
 @include_block pbr_brdf
 @include_block pbr_lights

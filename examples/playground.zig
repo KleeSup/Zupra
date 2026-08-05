@@ -126,11 +126,15 @@ pub fn init() void {
     env.ambient = .{ .r = 0.02, .g = 0.02, .b = 0.03, .a = 1 };
 
     // Dim sun so the point lights dominate.
-    _ = env.addLight(Light.directional(
+    const sun = env.addLight(Light.directional(
         .{ .x = -0.5, .y = -1.0, .z = -0.35 },
         .{ .r = 1.0, .g = 0.96, .b = 0.9, .a = 1 },
-        0.6,
+        3.0,
     )) catch unreachable;
+
+    if (env.getLight(sun)) |l| {
+        l.shadow = .{ .enabled = true, .resolution = 2048, .cascade_count = 4, .max_distance = 60 };
+    }
 
     floor_model = Model.fromMesh(gpa, MeshBuilder.plane(48, 48), .{
         .base_color = .{ .r = 0.5, .g = 0.5, .b = 0.55, .a = 1 },
@@ -150,8 +154,8 @@ pub fn init() void {
     }) catch unreachable;
 
     // 48 lights to start - already 3x the old fixed cap.
-    var i: usize = 0;
-    while (i < 48) : (i += 1) addMover();
+    //var i: usize = 0;
+    //while (i < 48) : (i += 1) addMover();
 }
 
 pub fn render() void {

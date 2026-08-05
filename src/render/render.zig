@@ -39,6 +39,12 @@ pub const Skybox = @import("skybox.zig").Skybox;
 pub const Cubemap = @import("cubemap.zig").Cubemap;
 pub const Ibl = @import("ibl.zig").Ibl;
 
+pub const ShadowAtlas = @import("shadow.zig").ShadowAtlas;
+pub const ShadowCaster = @import("shadow.zig").ShadowCaster;
+pub const ShadowSettings = @import("shadow.zig").ShadowSettings;
+pub const ShadowRenderer = @import("shadow_renderer.zig").ShadowRenderer;
+pub const ShadowData = @import("shadow_renderer.zig").ShadowData;
+
 pub const FirstPersonController = @import("fpscontroller.zig").FirstPersonController;
 
 pub const gltf = @import("gltf.zig");

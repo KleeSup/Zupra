@@ -236,7 +236,11 @@ float sampleShadow(int shadow_index, int cascade, vec3 world_pos, float ndotl) {
 
     // Outside the light frustum -> lit (no shadow data there).
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || depth_ref > 1.0) {
+#ifdef ZUPRA_SHADOW_DEBUG
+        return 2.0; // sentinel: fragment fell OUTSIDE the light frustum
+#else
         return 1.0;
+#endif
     }
 
     // PCF: NxN comparison-sampled taps. The comparison sampler returns the
@@ -344,6 +348,23 @@ vec3 pbrShade(vec3 world_pos, vec3 N, vec3 V, vec3 albedo,
 
     vec3 ambient = (kD * diffuse + specular) * ao;
     vec3 result = ambient + Lo;
+
+#ifdef ZUPRA_SHADOW_DEBUG
+    // Override the final color with a shadow diagnostic for directional light 0,
+    // AFTER computing real shading so no bindings get stripped by shdc.
+    //   BLUE  = fragment projected OUTSIDE the light frustum (projection wrong).
+    //   RED   = in shadow.   GREEN = lit.   MAGENTA = light 0 has no shadow idx.
+    // A tiny amount of `result` is mixed in (0.0001) so it can't be stripped.
+    int dbg_si = int(dir_direction[0].w);
+    vec3 dbg;
+    if (dbg_si >= 0) {
+        float f = shadowFactor(dbg_si, world_pos, N, view_depth);
+        dbg = (f > 1.5) ? vec3(0.0, 0.0, 1.0) : vec3(1.0 - f, f, 0.0);
+    } else {
+        dbg = vec3(1.0, 0.0, 1.0);
+    }
+    return dbg + result * 0.0001;
+#endif
 
     return result;
 }

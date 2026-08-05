@@ -159,6 +159,10 @@ pub const MeshRenderer = struct {
     ibl_brdf_lut: sg.View = .{},
     ibl_sampler: sg.Sampler = .{},
 
+    shadow_atlas: sg.View = .{},
+    shadow_sampler: sg.Sampler = .{},
+    shadow_params: *const shd.ShadowParams = undefined,
+
     pub fn init(cache: *PipelineCache) MeshRenderer {
         return .{
             .cache = cache,
@@ -182,6 +186,12 @@ pub const MeshRenderer = struct {
         self.ibl_prefilter = prefilter;
         self.ibl_brdf_lut = brdf_lut;
         self.ibl_sampler = sampler;
+    }
+
+    pub fn setShadows(self: *MeshRenderer, atlas: sg.View, sampler: sg.Sampler, params: *const shd.ShadowParams) void {
+        self.shadow_atlas = atlas;
+        self.shadow_sampler = sampler;
+        self.shadow_params = params;
     }
 
     pub fn begin(self: *MeshRenderer, camera: Camera3D, env: *Environment) void {
@@ -259,6 +269,7 @@ pub const MeshRenderer = struct {
                     bindings.views[shd_unlit.VIEW_base_color_map] = material.map(.base_color).view;
                     bindings.views[shd_unlit.VIEW_emissive_map] = material.map(.emissive).view;
                     bindings.samplers[shd_unlit.SMP_smp_material] = mat_smp;
+
                     unlit_fs = .{
                         .base_color = .{ bc.r, bc.g, bc.b, bc.a },
                         .emissive = .{ emc.r, emc.g, emc.b, es },
@@ -269,6 +280,9 @@ pub const MeshRenderer = struct {
                     bindings.views[shd_lambert.VIEW_base_color_map] = material.map(.base_color).view;
                     bindings.views[shd_lambert.VIEW_emissive_map] = material.map(.emissive).view;
                     bindings.samplers[shd_lambert.SMP_smp_material] = mat_smp;
+
+                    bindings.views[shd_lambert.VIEW_shadow_atlas] = self.shadow_atlas;
+                    bindings.samplers[shd_lambert.SMP_smp_shadow] = self.shadow_sampler;
 
                     self.lighting.bind(&bindings, .{
                         .light_data = shd_lambert.VIEW_light_data,
@@ -294,6 +308,9 @@ pub const MeshRenderer = struct {
                     bindings.views[shd.VIEW_metallic_roughness_map] = material.map(.metallic_roughness).view;
                     bindings.views[shd.VIEW_occlusion_map] = material.map(.occlusion).view;
                     bindings.samplers[shd.SMP_smp_material] = mat_smp;
+
+                    bindings.views[shd.VIEW_shadow_atlas] = self.shadow_atlas;
+                    bindings.samplers[shd.SMP_smp_shadow] = self.shadow_sampler;
 
                     self.lighting.bind(&bindings, .{
                         .light_data = shd.VIEW_light_data,
@@ -344,6 +361,7 @@ pub const MeshRenderer = struct {
                     sg.applyUniforms(shd_lambert.UB_uv_params, sg.asRange(&uvp));
                     var lp = self.lighting.params();
                     sg.applyUniforms(shd_lambert.UB_light_params, sg.asRange(&lp));
+                    sg.applyUniforms(shd_lambert.UB_shadow_params, sg.asRange(self.shadow_params));
                 },
                 .pbr => {
                     sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&pbr_fs));
@@ -351,6 +369,7 @@ pub const MeshRenderer = struct {
                     sg.applyUniforms(shd.UB_uv_params, sg.asRange(&uvp));
                     var lp = self.lighting.params();
                     sg.applyUniforms(shd.UB_light_params, sg.asRange(&lp));
+                    sg.applyUniforms(shd.UB_shadow_params, sg.asRange(self.shadow_params));
                 },
             }
         }
