@@ -92,10 +92,10 @@ pub const ClusterBuilder = struct {
     index_view: sg.View = .{},
 
     // CPU staging
-    table: std.ArrayListUnmanaged([2]u32) = .empty, // (offset, count) per froxel
-    indices: std.ArrayListUnmanaged(u32) = .empty, // flat, capacity per froxel
-    counts: std.ArrayListUnmanaged(u32) = .empty, // fill count per froxel
-    bounds: std.ArrayListUnmanaged(LightBound) = .empty,
+    table: std.ArrayList([2]u32) = .empty, // (offset, count) per froxel
+    indices: std.ArrayList(u32) = .empty, // flat, capacity per froxel
+    counts: std.ArrayList(u32) = .empty, // fill count per froxel
+    bounds: std.ArrayList(LightBound) = .empty,
 
     /// Depth-slice constants, recomputed when the camera's near/far change.
     /// Uploaded to the shader so it derives the same slice index.

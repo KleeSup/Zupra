@@ -88,10 +88,13 @@ vec3 fresnelSchlickRoughness(float cosT, vec3 F0, float roughness) {
 
 // Fetch texel k (0..5) of punctual light `idx` from the light-data texture.
 vec4 lightTexel(int idx, int k) {
-    int row = idx / LIGHTS_PER_ROW;
-    int col = idx - row * LIGHTS_PER_ROW;
+    // uint index math: signed integer divide/mod triggers D3D X3556 and is
+    // slower, and this runs per-light per-pixel - the hottest path in shading.
+    uint uidx = uint(idx);
+    uint row = uidx / uint(LIGHTS_PER_ROW);
+    uint col = uidx % uint(LIGHTS_PER_ROW);
     return texelFetch(sampler2D(light_data, smp_data),
-                      ivec2(col * TEXELS_PER_LIGHT + k, row), 0);
+                      ivec2(int(col) * TEXELS_PER_LIGHT + k, int(row)), 0);
 }
 
 // Which froxel a pixel belongs to. Screen tile from gl_FragCoord, depth slice
