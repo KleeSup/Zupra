@@ -96,7 +96,7 @@ pub const SceneRenderer = struct {
 
     // per-frame captured state
     camera: Camera3D = undefined,
-    env: Environment = .{},
+    env: *Environment = undefined,
 
     pub fn init(allocator: std.mem.Allocator, cache: *PipelineCache, mode: ShadingMode, width: u32, height: u32) SceneRenderer {
         var self = SceneRenderer{
@@ -183,7 +183,7 @@ pub const SceneRenderer = struct {
         self.post.aa = method;
     }
 
-    pub fn begin(self: *SceneRenderer, camera: Camera3D, env: Environment) void {
+    pub fn begin(self: *SceneRenderer, camera: Camera3D, env: *Environment) void {
         const w: u32 = @intFromFloat(sapp.widthf());
         const h: u32 = @intFromFloat(sapp.heightf());
         self.ensureSize(w, h);
@@ -193,6 +193,13 @@ pub const SceneRenderer = struct {
         self.env = env;
         self.transparent.clearRetainingCapacity();
         self.forward_opaque.clearRetainingCapacity();
+
+        env.lighting.beginFrame(
+            camera,
+            env.ambient,
+            @floatFromInt(self.width),
+            @floatFromInt(self.height),
+        );
 
         if (!self.ibl_baked) {
             if (self.ibl) |*ibl| {

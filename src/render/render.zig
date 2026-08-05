@@ -28,6 +28,8 @@ pub const GBuffer = @import("gbuffer.zig").GBuffer;
 pub const GeometryRenderer = @import("deferred.zig").GeometryRenderer;
 pub const Light = @import("light.zig").Light;
 pub const LightType = @import("light.zig").LightType;
+pub const LightHandle = @import("light.zig").LightHandle;
+pub const LightingFrame = @import("lighting.zig").LightingFrame;
 pub const DeferredRenderer = @import("deferred.zig").DeferredRenderer;
 pub const Material = @import("material.zig").Material;
 

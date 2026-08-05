@@ -92,9 +92,9 @@ pub const Scene = struct {
     }
 
     /// Copy this scene's lights into an Environment (clears existing lights).
-    pub fn applyLights(self: Scene, env: *@import("environment.zig").Environment) void {
+    pub fn applyLights(self: Scene, env: *@import("environment.zig").Environment) !void {
         env.clearLights();
-        for (self.lights) |l| env.addLight(l);
+        for (self.lights) |l| _ = try env.addLight(l);
     }
 };
 

@@ -44,9 +44,7 @@ const Matrix = math.Matrix;
 const Vec3 = math.Vec3;
 const Color = zupra.Color;
 const Light = @import("light.zig").Light;
-const LightParams = @import("light.zig").LightParams;
-const packLightParams = @import("light.zig").packLightParams;
-const MAX_LIGHTS = @import("light.zig").MAX_LIGHTS;
+const LightingFrame = @import("lighting.zig").LightingFrame;
 const Environment = @import("environment.zig").Environment;
 
 // =====================================================================
@@ -227,17 +225,19 @@ pub const DeferredRenderer = struct {
         self: *DeferredRenderer,
         gbuf: GBuffer,
         camera: Camera3D,
-        env: Environment,
+        env: *Environment, // pointer now
         pass: PassSignature,
     ) void {
-        var params = packLightParams(env.lights(), env.ambient, camera.position);
-
         const inv_vp = zupra.math.zm.inverse(camera.viewProjection());
         var recon = ReconParams{ .inv_view_proj = @bitCast(inv_vp) };
 
+        // The per-frame light upload + cluster build is driven ONCE by
+        // SceneRenderer.begin (env.lighting.beginFrame). Here we only read it.
+        var lp = env.lighting.params();
+
         const key = PipelineKey{
             .shader = self.shader,
-            .layout = .fullscreen, // fullscreen tri uses pos+uv (color slot unused)
+            .layout = .fullscreen,
             .index_type = .u32,
             .indexed = false,
             .pass = pass,
@@ -254,20 +254,34 @@ pub const DeferredRenderer = struct {
 
         var bindings = sg.Bindings{};
         bindings.vertex_buffers[0] = self.fullscreen_vbuf;
+
+        // G-buffer inputs.
         bindings.views[shd_light.VIEW_tex_albedo] = gbuf.albedoTexture().view;
         bindings.views[shd_light.VIEW_tex_normal] = gbuf.normalTexture().view;
         bindings.views[shd_light.VIEW_tex_material] = gbuf.materialTexture().view;
         bindings.views[shd_light.VIEW_tex_emissive] = gbuf.emissiveTexture().view;
         bindings.views[shd_light.VIEW_tex_depth] = gbuf.depthTexture().view;
-        bindings.samplers[shd_light.SMP_smp] = self.sampler;
+
+        // IBL.
         bindings.views[shd_light.VIEW_irradiance_map] = self.ibl_irradiance;
         bindings.views[shd_light.VIEW_prefilter_map] = self.ibl_prefilter;
         bindings.views[shd_light.VIEW_brdf_lut] = self.ibl_brdf_lut;
+
+        // Clustered lights.
+        env.lighting.bind(&bindings, .{
+            .light_data = shd_light.VIEW_light_data,
+            .cluster_table = shd_light.VIEW_cluster_table,
+            .cluster_indices = shd_light.VIEW_cluster_indices,
+            .sampler = shd_light.SMP_smp_data,
+        });
+
+        // Samplers: smp (G-buffer, NEAREST) and smp_cube (IBL, filtering).
+        bindings.samplers[shd_light.SMP_smp] = self.sampler;
         bindings.samplers[shd_light.SMP_smp_cube] = self.ibl_sampler;
 
         sg.applyPipeline(pip);
         sg.applyBindings(bindings);
-        sg.applyUniforms(shd_light.UB_light_params, sg.asRange(&params));
+        sg.applyUniforms(shd_light.UB_light_params, sg.asRange(&lp));
         sg.applyUniforms(shd_light.UB_recon_params, sg.asRange(&recon));
         sg.draw(0, 3, 1);
     }
