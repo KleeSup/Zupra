@@ -39,6 +39,7 @@ const PipelineCache = pipeline.PipelineCache;
 const PassSignature = pipeline.PassSignature;
 const Mesh = mesh_mod.Mesh;
 const MeshRenderer = mesh_mod.MeshRenderer;
+const DepthPrepass = @import("depth_prepass.zig").DepthPrepass;
 const Material = material_mod.Material;
 const ModelInstance = model_mod.ModelInstance;
 const GBuffer = gbuffer_mod.GBuffer;
@@ -97,6 +98,14 @@ pub const SceneRenderer = struct {
 
     // forward-only
     forward: MeshRenderer = undefined,
+    prepass: DepthPrepass = undefined,
+
+    /// Lay depth down before shading in forward mode. Costs one position-only
+    /// draw per eligible submesh and saves shading every fragment that ends up
+    /// hidden -- worth it whenever geometry overlaps in screen space, which is
+    /// most scenes. The deferred path ignores this: its G-buffer pass already
+    /// resolves visibility before any lighting runs.
+    depth_prepass: bool = true,
     forward_opaque: std.ArrayList(ForwardEntry) = .empty,
 
     // Opaque submissions for this frame. draw() records into this; end() replays
@@ -129,6 +138,7 @@ pub const SceneRenderer = struct {
         // Forward renderer exists in BOTH modes: forward mode uses it for
         // opaque, and both modes use it to forward-shade transparents.
         self.forward = MeshRenderer.init(cache);
+        self.prepass = DepthPrepass.init(cache);
         if (mode == .deferred) {
             self.gbuffer = GBuffer.init(width, height);
             self.geo = GeometryRenderer.init(cache);
@@ -149,6 +159,7 @@ pub const SceneRenderer = struct {
             self.geo.deinit();
         }
         self.forward.deinit();
+        self.prepass.deinit();
         self.post.deinit();
         self.scene_color.deinit();
         if (self.skybox) |*s| s.deinit();
@@ -328,6 +339,17 @@ pub const SceneRenderer = struct {
             },
             .forward => {
                 zupra.beginDrawingFramebufferClear(self.scene_color, self.clear_color);
+
+                // Depth prepass, inside the same pass so the depth buffer stays
+                // live between the two. Colour writes are masked off, so this
+                // only populates depth and the clear above is untouched.
+                if (self.depth_prepass) {
+                    self.prepass.begin(self.camera, self.scene_color.passSignature());
+                    for (self.opaque_queue.items) |e| self.prepass.draw(e.mesh, e.model, e.material);
+                    self.prepass.end();
+                }
+                self.forward.depth_prepass = self.depth_prepass;
+
                 self.forward.beginEx(self.camera, self.env, self.scene_color.passSignature());
             },
         }

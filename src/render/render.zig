@@ -45,6 +45,8 @@ pub const ShadowSettings = @import("shadow.zig").ShadowSettings;
 pub const ShadowRenderer = @import("shadow_renderer.zig").ShadowRenderer;
 pub const ShadowData = @import("shadow_renderer.zig").ShadowData;
 
+pub const DepthPrepass = @import("depth_prepass.zig").DepthPrepass;
+
 pub const FirstPersonController = @import("fpscontroller.zig").FirstPersonController;
 
 pub const gltf = @import("gltf.zig");

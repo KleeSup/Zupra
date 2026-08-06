@@ -148,6 +148,8 @@ pub const PipelineKey = struct {
     depth_bias_slope_bits: u32 = 0,
     depth_bias_clamp_bits: u32 = 0,
 
+    color_write_mask: sg.ColorMask = .RGBA,
+
     /// false = non-indexed draw (sokol index_type = .NONE). Debug lines/fills
     /// and fullscreen post-fx triangles use this, but indexed meshes/sprites = true.
     indexed: bool = true,
@@ -197,6 +199,7 @@ fn buildDesc(key: PipelineKey) sg.PipelineDesc {
             desc.colors[i] = .{
                 .pixel_format = key.pass.color_formats[i],
                 .blend = blend,
+                .write_mask = key.color_write_mask,
             };
         }
     }

@@ -144,6 +144,26 @@ pub const Mesh = struct {
 
 // --- draw path ---
 
+/// Whether a material's geometry can be laid down by the depth prepass.
+///
+/// This lives next to the draw that makes the inverse decision about depth
+/// writes, because the two have to agree exactly: geometry in the prepass must
+/// NOT write depth again, and geometry outside it MUST. Splitting the rule
+/// across two files is how that invariant quietly breaks later.
+///
+/// Excluded, and why:
+///   blend  - no single depth to record; drawn sorted, after everything.
+///   mask   - needs the fragment shader to discard, which a position-only pass
+///            can't do; cut-outs would be laid down as solid.
+///   unlit / custom shader - may use a vertex layout other than .mesh, and the
+///            prepass binds .mesh. A stride mismatch reads garbage.
+pub fn depthPrepassEligible(material: Material) bool {
+    if (material.alpha_mode != .opaque_) return false;
+    if (material.shader != null) return false;
+    if (material.shading == .unlit) return false;
+    return true;
+}
+
 pub const MeshRenderer = struct {
     cache: *PipelineCache,
     shaders: ShaderSet,
@@ -162,6 +182,10 @@ pub const MeshRenderer = struct {
     shadow_atlas: sg.View = .{},
     shadow_sampler: sg.Sampler = .{},
     shadow_params: *const shd.ShadowParams = undefined,
+
+    /// Set by the owner when a DepthPrepass runs ahead of this renderer in the
+    /// same pass. Affects depth writes only -- shading is identical either way.
+    depth_prepass: bool = false,
 
     pub fn init(cache: *PipelineCache) MeshRenderer {
         return .{
@@ -226,7 +250,15 @@ pub const MeshRenderer = struct {
             .cull = material.cullMode(),
             .blend = material.blendMode(),
             .depth_test = true,
-            .depth_write = material.alpha_mode != .blend,
+            // With a prepass ahead of this draw, depth for eligible geometry is
+            // already final, so writing it again is wasted bandwidth and forfeits
+            // the early-z rejection the prepass exists to buy. Anything the
+            // prepass skipped still has to write its own depth, which is why this
+            // consults the same predicate instead of a plain flag.
+            .depth_write = if (self.depth_prepass and depthPrepassEligible(material))
+                false
+            else
+                material.alpha_mode != .blend,
             .face_winding = .CCW,
         };
         const pip = self.cache.get(key) catch |err| {

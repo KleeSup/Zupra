@@ -133,7 +133,7 @@ pub fn init() void {
     )) catch unreachable;
 
     if (env.getLight(sun)) |l| {
-        l.shadow = .{ .enabled = true, .resolution = 2048, .cascade_count = 4, .max_distance = 60 };
+        l.shadow = .{ .enabled = true, .resolution = 2048, .cascade_count = 1, .max_distance = 60 };
     }
 
     floor_model = Model.fromMesh(gpa, MeshBuilder.plane(48, 48), .{
@@ -154,8 +154,8 @@ pub fn init() void {
     }) catch unreachable;
 
     // 48 lights to start - already 3x the old fixed cap.
-    //var i: usize = 0;
-    //while (i < 48) : (i += 1) addMover();
+    var i: usize = 0;
+    while (i < 63) : (i += 1) addMover();
 }
 
 pub fn render() void {
