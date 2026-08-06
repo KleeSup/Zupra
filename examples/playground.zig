@@ -109,7 +109,7 @@ fn removeMovers(n: usize) void {
 pub fn init() void {
     gpa = zupra.getGPA();
     cache = .init(gpa);
-    scene = zupra.render.SceneRenderer.init(gpa, &cache, .forward, 1280, 720);
+    scene = zupra.render.SceneRenderer.init(gpa, &cache, .deferred, 1280, 720);
     scene.setAAMethod(.fxaa);
 
     cam = zupra.render.Camera3D.init(16.0 / 9.0);
@@ -133,7 +133,12 @@ pub fn init() void {
     )) catch unreachable;
 
     if (env.getLight(sun)) |l| {
-        l.shadow = .{ .enabled = true, .resolution = 2048, .cascade_count = 1, .max_distance = 60 };
+        l.shadow = .{
+            .enabled = true,
+            //     .resolution = 2048,
+            //.cascade_count = 4,
+            .max_distance = 60,
+        };
     }
 
     floor_model = Model.fromMesh(gpa, MeshBuilder.plane(48, 48), .{

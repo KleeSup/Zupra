@@ -186,8 +186,9 @@ int punctualShadowIndex(int idx) {
 //    layout(binding=?) uniform shadow_params {
 //        vec4 sh_vp[MAX_SHADOWED * MAX_CASCADES];  // 4 vec4 per mat4, see index
 //        vec4 sh_rect[MAX_SHADOWED * MAX_CASCADES];// atlas rect per cascade
-//        vec4 sh_info[MAX_SHADOWED];   // x cascades, y pcf radius, z normal bias, w texel
+//        vec4 sh_info[MAX_SHADOWED];   // x cascades, y pcf radius, z blend, w texel
 //        vec4 sh_split[MAX_SHADOWED];  // cascade far splits (view depth)
+//        vec4 sh_bias[MAX_SHADOWED];   // normal-offset bias (world), per cascade
 //    };
 //    uniform texture2D shadow_atlas;
 //    uniform samplerShadow smp_shadow;  // comparison sampler
@@ -202,6 +203,33 @@ mat4 shadowMatrix(int shadow_index, int cascade) {
     // transpose -- which is exactly what the M * v multiply downstream wants.
     int o = (shadow_index * MAX_CASCADES + cascade) * 4;
     return mat4(sh_vp[o + 0], sh_vp[o + 1], sh_vp[o + 2], sh_vp[o + 3]);
+}
+
+// Runtime vec4-component indexing (v[c] with a non-constant c) can't be
+// flattened on the glsl300es legacy target, so every per-cascade lookup below
+// spells the components out.
+//
+// Both are written as one initialised local assigned through an if/else chain
+// rather than a series of early returns. Equivalent in GLSL, but SPIRV-Cross
+// rewrites early returns into a temp guarded by branch flags, and FXC then
+// can't prove the temp is assigned on every path -- which produces a stream of
+// X4000 "potentially uninitialized variable" warnings on the D3D11 backend.
+float cascadeSplit(int shadow_index, int cascade) {
+    vec4 splits = sh_split[shadow_index];
+    float v = splits.w;
+    if (cascade == 0) v = splits.x;
+    else if (cascade == 1) v = splits.y;
+    else if (cascade == 2) v = splits.z;
+    return v;
+}
+
+float cascadeNormalBias(int shadow_index, int cascade) {
+    vec4 b = sh_bias[shadow_index];
+    float v = b.w;
+    if (cascade == 0) v = b.x;
+    else if (cascade == 1) v = b.y;
+    else if (cascade == 2) v = b.z;
+    return v;
 }
 
 int pickCascade(int shadow_index, float view_depth) {
@@ -255,14 +283,44 @@ float sampleShadow(int shadow_index, int cascade, vec3 world_pos, float ndotl) {
     return sum / max(count, 1.0);
 }
 
+// Sample one cascade with its own normal-offset bias. The bias is per cascade
+// because a texel covers a different amount of world space in each, and the
+// offset has to clear roughly one texel to beat acne.
+float shadowInCascade(int shadow_index, int cascade, vec3 world_pos, vec3 N) {
+    vec3 biased = world_pos + N * cascadeNormalBias(shadow_index, cascade);
+    return sampleShadow(shadow_index, cascade, biased, 1.0);
+}
+
 float shadowFactor(int shadow_index, vec3 world_pos, vec3 N, float view_depth) {
     if (shadow_index < 0) return 1.0;
+
+    int cascades = int(sh_info[shadow_index].x);
     int cascade = pickCascade(shadow_index, view_depth);
-    // Normal-offset bias: push the sample point along the surface normal to
-    // fight acne without the peter-panning heavy depth bias causes.
-    float nb = sh_info[shadow_index].z;
-    vec3 biased = world_pos + N * nb;
-    return sampleShadow(shadow_index, cascade, biased, 1.0);
+    float sh = shadowInCascade(shadow_index, cascade, world_pos, N);
+
+    // CASCADE BLEND. Adjacent cascades differ in resolution, in fitted extent
+    // and in bias, so switching between them at a hard threshold draws a visible
+    // arc across the ground wherever that threshold falls. Fading across a band
+    // just inside the split hides the transition.
+    //
+    // The band is a fraction of the split distance rather than a fixed width, so
+    // it scales with the cascade -- a metre-wide band is generous near the
+    // camera and invisibly thin out at the far split.
+    //
+    // Only fragments inside the band pay for the second lookup; everything else
+    // takes the branch once. On the last cascade there's nothing to blend into,
+    // and the distance fade (later) takes over instead.
+    if (cascade + 1 < cascades) {
+        float split = cascadeSplit(shadow_index, cascade);
+        float band = split * sh_info[shadow_index].z;
+        if (band > 0.0 && view_depth > split - band) {
+            float t = clamp((view_depth - (split - band)) / band, 0.0, 1.0);
+            float next = shadowInCascade(shadow_index, cascade + 1, world_pos, N);
+            sh = mix(sh, next, t);
+        }
+    }
+
+    return sh;
 }
 #else
 float shadowFactor(int shadow_index, vec3 world_pos, vec3 N, float view_depth) {

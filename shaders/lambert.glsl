@@ -112,6 +112,7 @@ layout(binding=4) uniform shadow_params {
     vec4 sh_rect[MAX_SHADOWED * MAX_CASCADES];
     vec4 sh_info[MAX_SHADOWED];
     vec4 sh_split[MAX_SHADOWED];
+    vec4 sh_bias[MAX_SHADOWED];
 };
 
 @include_block pbr_brdf

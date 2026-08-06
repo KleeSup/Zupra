@@ -49,12 +49,16 @@ pub const ShadowData = extern struct {
     view_proj: [max_cascades][16]f32,
     /// Atlas rect per cascade (xy origin, zw size, in [0,1] UV).
     rect: [max_cascades][4]f32,
-    /// x = cascade count, y = pcf radius (texels), z = normal bias (world),
+    /// x = cascade count, y = pcf radius (texels), z = cascade blend fraction,
     /// w = atlas texel size (1/atlas_size, for PCF tap spacing).
     params: [4]f32,
     /// Cascade split distances (view-space), x..w = splits 0..3 far planes.
     /// Used to pick the cascade for a fragment by its depth.
     splits: [4]f32,
+    /// Normal-offset bias in WORLD units, one per cascade (x..w = cascades
+    /// 0..3). Resolved on the CPU because it depends on each cascade's fitted
+    /// extent, which the shader has no way to recover from the matrix.
+    normal_bias: [4]f32,
 };
 
 pub const ShadowRenderer = struct {
@@ -137,7 +141,7 @@ pub const ShadowRenderer = struct {
         d.params = .{
             @floatFromInt(cascades),
             @floatFromInt(s.pcf_radius),
-            s.normal_bias,
+            s.cascade_blend,
             1.0 / @as(f32, @floatFromInt(self.atlas.size)),
         };
 
@@ -153,13 +157,17 @@ pub const ShadowRenderer = struct {
         var c: u32 = 0;
         while (c < cascades) : (c += 1) {
             const tile = self.atlas.allocate(s.resolution) orelse break; // atlas full
-            const vp = fitDirectionalCascade(camera, light_dir, splits[c], splits[c + 1], tile.size, s.caster_extrusion);
+            const fit = fitDirectionalCascade(camera, light_dir, splits[c], splits[c + 1], tile.size, s.caster_extrusion);
 
-            d.view_proj[c] = matToArr(vp);
+            d.view_proj[c] = matToArr(fit.view_proj);
             d.rect[c] = tile.rect.uv;
+            // Texels -> world, per cascade. A near cascade's texel is a fraction
+            // of a far cascade's, so this is where one authored number becomes
+            // four correct ones.
+            d.normal_bias[c] = s.normal_bias_texels * fit.texel_world;
 
             self.casters.append(self.allocator, .{
-                .view_proj = vp,
+                .view_proj = fit.view_proj,
                 .rect = tile.rect,
                 .tile_x = tile.x,
                 .tile_y = tile.y,
@@ -300,6 +308,15 @@ pub const ShadowRenderer = struct {
 /// so the map samples the same world points frame to frame, which is what stops
 /// shadow edges from crawling and boiling as the camera moves. Getting this
 /// right is most of the difference between a real CSM and a naive one.
+/// A fitted cascade: its light-space view-projection, plus how much world space
+/// one of its shadow texels covers. The latter is what lets bias be specified
+/// once in texels and stay correct across cascades of very different extents.
+const CascadeFit = struct {
+    view_proj: Matrix,
+    /// World units per shadow texel in this cascade.
+    texel_world: f32,
+};
+
 fn fitDirectionalCascade(
     camera: Camera3D,
     light_dir: Vec3,
@@ -307,7 +324,7 @@ fn fitDirectionalCascade(
     far_split: f32,
     tile_size: u32,
     caster_extrusion: f32,
-) Matrix {
+) CascadeFit {
     // Frustum-slice corners in world space.
     var corners: [8]Vec3 = undefined;
     frustumSliceCorners(camera, near_split, far_split, &corners);
@@ -357,7 +374,12 @@ fn fitDirectionalCascade(
     const far_z = center_ls[2] + radius;
     const light_proj = zm.orthographicOffCenterLh(l, r, b, t, near_z, far_z);
 
-    return zm.mul(light_view, light_proj);
+    return .{
+        .view_proj = zm.mul(light_view, light_proj),
+        // The box spans 2*radius across tile_size texels. Same quantity the snap
+        // above works in, so the two can't disagree.
+        .texel_world = (radius * 2.0) / @as(f32, @floatFromInt(tile_size)),
+    };
 }
 
 /// The 8 world-space corners of the camera frustum between two view distances.

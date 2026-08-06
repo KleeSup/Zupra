@@ -479,6 +479,7 @@ fn packShadowParams(rend: *const ShadowRenderer) ShadowParams {
         }
         p.sh_info[li] = d.params;
         p.sh_split[li] = d.splits;
+        p.sh_bias[li] = d.normal_bias;
     }
     return p;
 }

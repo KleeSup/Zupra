@@ -70,9 +70,24 @@ pub const ShadowSettings = struct {
     depth_bias: f32 = 2.0,
     /// Slope-scaled depth bias — surfaces at grazing angles need more.
     slope_bias: f32 = 3.0,
-    /// Normal-offset bias (world units): push the sample along the normal to
-    /// avoid acne without the peter-panning that heavy depth bias causes.
-    normal_bias: f32 = 0.02,
+    /// Normal-offset bias, in SHADOW TEXELS rather than world units: push the
+    /// sample point along the surface normal to avoid acne without the
+    /// peter-panning heavy depth bias causes.
+    ///
+    /// Texels, not world units, because the whole point of cascades is that a
+    /// texel covers wildly different amounts of world space in each one -- a
+    /// near cascade might be centimetres per texel where the far one is tens of
+    /// centimetres. A fixed world offset tuned for the far cascade is then
+    /// grossly oversized in the near one (visible light leaking under contact
+    /// shadows), and one tuned for the near cascade leaves the far one full of
+    /// acne. Expressed in texels it converts to world units per cascade and
+    /// stays correct in all of them.
+    normal_bias_texels: f32 = 1.5,
+    /// Width of the cross-fade between adjacent cascades, as a fraction of the
+    /// cascade's far split. Without it the switch is instantaneous and shows up
+    /// as a hard arc across the ground where resolution and bias change. Costs a
+    /// second shadow lookup for fragments inside the band only.
+    cascade_blend: f32 = 0.1,
     /// Max distance from the camera the shadow is rendered to. Directional
     /// shadows fit their ortho box to this; beyond it, surfaces are unshadowed
     /// (or faded — see distance fade, a later feature).
