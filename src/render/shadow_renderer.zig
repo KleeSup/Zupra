@@ -125,8 +125,8 @@ pub const ShadowRenderer = struct {
 
             const assigned: bool = switch (l.type) {
                 .directional => self.buildDirectional(l.*, l.shadow, camera),
-                // .spot => self.buildSpot(l.*, l.shadow, camera),   // Phase 3
-                // .point => self.buildPoint(l.*, l.shadow, camera), // Phase 3
+                .spot => self.buildSpot(l.*, l.shadow, camera),
+                // .point => self.buildPoint(l.*, l.shadow, camera), // Phase 4
                 else => false,
             };
             if (assigned) {
@@ -180,6 +180,82 @@ pub const ShadowRenderer = struct {
         // If the atlas was full before even cascade 0 got a tile, this light is
         // unshadowed this frame (rect stays zero-size).
         if (d.rect[0][2] <= 0.0) return false;
+        self.data[self.data_count] = d;
+        self.data_count += 1;
+        return true;
+    }
+
+    /// Spot lights need one tile and one perspective matrix -- the cone already
+    /// defines the frustum, so there is no fitting problem to solve and no
+    /// cascades to split. The shader side needs nothing new: sampleShadow
+    /// already divides by w, so a projective matrix works there unchanged, and
+    /// with cascade_count of 1 both pickCascade and the blend branch fall
+    /// through to cascade 0.
+    fn buildSpot(self: *ShadowRenderer, l: Light, s: ShadowSettings, camera: Camera3D) bool {
+        // Cheap reject: a spot whose reach never comes near the view isn't worth
+        // a tile. Tiles are the scarce resource -- one wasted here is one a
+        // visible light doesn't get -- so this is about allocation, not just
+        // draw cost.
+        const to_light = l.position.sub(camera.position).length();
+        if (to_light - l.range > s.max_distance) return false;
+
+        const tile = self.atlas.allocate(s.resolution) orelse return false; // atlas full
+
+        // The cone half-angle IS the frustum half-angle, so the vertical fov is
+        // twice the outer angle at aspect 1. Clamped below a full hemisphere:
+        // a perspective projection degenerates as the half-angle approaches 90
+        // degrees, and a cone that wide wants a point light's cubemap anyway.
+        const outer_deg = std.math.clamp(l.spot_outer_deg, 1.0, 89.0);
+        const fov_y = std.math.degreesToRadians(outer_deg * 2.0);
+
+        // Near plane scaled to the light's reach rather than fixed. Depth
+        // precision in a projective map is governed by the far/near ratio, so a
+        // hardcoded small near would quietly wreck a long-range spot while
+        // costing nothing on a short one.
+        const near_z = @max(0.05, l.range * 0.01);
+        const far_z = @max(near_z + 0.1, l.range);
+
+        const dir = l.direction.normalize();
+        const up = pickUp(dir);
+        const light_view = zm.lookAtLh(
+            v4(l.position, 1),
+            v4(l.position.add(dir), 1),
+            v4(up, 0),
+        );
+        const light_proj = zm.perspectiveFovLh(fov_y, 1.0, near_z, far_z);
+        const view_proj = zm.mul(light_view, light_proj);
+
+        var d: ShadowData = std.mem.zeroes(ShadowData);
+        d.params = .{
+            1.0, // one cascade
+            @floatFromInt(s.pcf_radius),
+            0.0, // no cascade blending with a single cascade
+            1.0 / @as(f32, @floatFromInt(self.atlas.size)),
+        };
+        d.splits = .{ far_z, far_z, far_z, far_z };
+        d.view_proj[0] = matToArr(view_proj);
+        d.rect[0] = tile.rect.uv;
+
+        // A projective map's texel covers more world space the further it is
+        // from the light, so unlike a cascade there is no single correct value.
+        // Half the range is the compromise: referencing the far plane instead
+        // would over-bias near the light and lift contact shadows off their
+        // casters. Removing the compromise needs a distance-scaled bias in the
+        // shader, which in turn needs the light position in the shadow uniform.
+        const ref_dist = far_z * 0.5;
+        const texel_world = 2.0 * ref_dist * @tan(fov_y * 0.5) / @as(f32, @floatFromInt(tile.size));
+        d.normal_bias[0] = s.normal_bias_texels * texel_world;
+
+        self.casters.append(self.allocator, .{
+            .view_proj = view_proj,
+            .rect = tile.rect,
+            .tile_x = tile.x,
+            .tile_y = tile.y,
+            .tile_size = tile.size,
+            .depth_bias = s.depth_bias,
+            .depth_bias_slope = s.slope_bias,
+        }) catch {};
+
         self.data[self.data_count] = d;
         self.data_count += 1;
         return true;

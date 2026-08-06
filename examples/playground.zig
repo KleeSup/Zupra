@@ -141,6 +141,27 @@ pub fn init() void {
         };
     }
 
+    // Spot shadow test rig. Positioned high and off to one side so the cone
+    // hits the sphere grid at a shallow angle -- the case that exposes a bad
+    // near plane or bad bias fastest.
+    const spot = env.addLight(Light.spot(
+        .{ .x = -8, .y = 9, .z = -6 }, // position
+        .{ .x = 0.6, .y = -1.0, .z = 0.45 }, // cone axis (travel direction)
+        .{ .r = 1.0, .g = 0.95, .b = 0.8, .a = 1 },
+        120.0, // intensity: punctual falloff is inverse-square, so this
+        // needs to be far higher than a directional's to read
+        30.0, // range: also the clustering cull bound, keep it honest
+        18.0, // inner cone half-angle, full intensity within
+        26.0, // outer half-angle, faded to zero -- and the shadow frustum
+    )) catch unreachable;
+
+    if (env.getLight(spot)) |l| {
+        // cascade_count stays 1: a spot's cone already is the frustum, so there
+        // is nothing to split. max_distance is the cull range for the light
+        // itself here, not a cascade range.
+        l.shadow = .{ .enabled = true, .resolution = 1024, .cascade_count = 1, .max_distance = 80 };
+    }
+
     floor_model = Model.fromMesh(gpa, MeshBuilder.plane(48, 48), .{
         .base_color = .{ .r = 0.5, .g = 0.5, .b = 0.55, .a = 1 },
         .metallic = 0.0,
