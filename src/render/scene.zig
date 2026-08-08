@@ -55,6 +55,7 @@ const Ibl = @import("ibl.zig").Ibl;
 const PostChain = @import("posprocess.zig").PostChain;
 const AAMethod = @import("posprocess.zig").AAMethod;
 const EnvironmentMap = @import("render.zig").EnvironmentMap;
+const Ssao = @import("render.zig").Ssao;
 
 const ShadowRenderer = @import("shadow_renderer.zig").ShadowRenderer;
 const ShadowParams = @import("shaders").mesh.ShadowParams;
@@ -159,6 +160,11 @@ pub const SceneRenderer = struct {
     shadow_draws: u32 = 0,
     shadow_instances: u32 = 0,
 
+    ssao: Ssao = undefined,
+    /// Screen-space occlusion. Deferred only: it needs the G-buffer's normals,
+    /// which the forward path does not produce.
+    ssao_enabled: bool = true,
+
     /// Submeshes submitted vs. those that survived camera culling last frame.
     submitted_draws: u32 = 0,
     visible_draws: u32 = 0,
@@ -211,6 +217,7 @@ pub const SceneRenderer = struct {
             self.gbuffer = GBuffer.init(width, height);
             self.geo = GeometryRenderer.init(cache);
             self.lit = DeferredRenderer.init(cache);
+            self.ssao = Ssao.init(cache, width, height, .{});
         }
         self.skybox = Skybox.init(cache);
         self.ibl = Ibl.init(allocator, cache);
@@ -528,6 +535,13 @@ pub const SceneRenderer = struct {
             .deferred => {
                 self.geo.end();
                 zupra.endDrawing(); // end G-buffer pass
+
+                if (self.ssao_enabled) {
+                    self.ssao.render(self.camera, self.gbuffer.depthTexture().view, self.gbuffer.normalTexture().view);
+                    self.lit.setSsao(self.ssao.aoView(), self.ssao.aoSampler());
+                } else {
+                    self.lit.setSsao(zupra.intern.white_1x1.view, self.ssao.aoSampler());
+                }
 
                 // PBR opaque -> scene-color via the lighting pass.
                 zupra.beginDrawingFramebufferClear(self.scene_color, self.clear_color);

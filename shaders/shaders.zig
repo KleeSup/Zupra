@@ -12,6 +12,8 @@ pub const irradiance = @import("irradiance.glsl.zig");
 pub const prefilter = @import("prefilter.glsl.zig");
 pub const sky_equirect = @import("sky_equirect.glsl.zig");
 pub const sky_cube = @import("sky_cube.glsl.zig");
+pub const ssao = @import("ssao.glsl.zig");
+pub const ssao_blur = @import("ssao_blur.glsl.zig");
 
 pub const lambert = @import("lambert.glsl.zig");
 pub const unlit = @import("unlit.glsl.zig");

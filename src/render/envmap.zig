@@ -121,7 +121,7 @@ pub const EnvironmentMap = struct {
             var face = try zstbi.Image.loadFromMemory(encoded, 4);
             defer face.deinit();
             if (face.width != size or face.height != size) {
-                std.log.err(
+                zupra.log.err(
                     "EnvironmentMap: cube face {d} is {d}x{d}, expected {d}x{d}",
                     .{ i, face.width, face.height, size, size },
                 );
@@ -130,8 +130,8 @@ pub const EnvironmentMap = struct {
             @memcpy(pixels[face_bytes * i .. face_bytes * (i + 1)], face.data);
         }
 
-        std.log.warn(
-            "EnvironmentMap: cube faces are 8-bit, so highlights clip at 1.0. Fine as a background; expect a flat IBL bake. An .hdr equirectangular map is the better light source.",
+        zupra.log.warn(
+            "EnvironmentMap: cube faces are 8-bit, so highlights clip at 1.0, which is fine as a background (expect a flat IBL bake though). Usually an .hdr equirectangular map is the better light source.",
             .{},
         );
 
@@ -173,7 +173,7 @@ pub const EnvironmentMap = struct {
         // reason to use a capture -- carries no more energy than white paper,
         // and the specular prefilter has nothing bright to gather.
         if (!image.is_hdr) {
-            std.log.err(
+            zupra.log.err(
                 "EnvironmentMap: source is not HDR (8-bit). Highlights are clipped at 1.0, so IBL will look flat. Use a Radiance .hdr.",
                 .{},
             );
@@ -249,7 +249,7 @@ pub const EnvironmentMap = struct {
             .depth_write = false,
         };
         const pip = self.cache.get(key) catch |err| {
-            std.log.err("EnvironmentMap: pipeline cache failed: {}", .{err});
+            zupra.log.err("EnvironmentMap: pipeline cache failed: {}", .{err});
             return;
         };
 

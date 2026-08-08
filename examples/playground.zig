@@ -1,23 +1,27 @@
 //! examples/playground.zig
 //!
-//! CLUSTERED LIGHTING + SHADOWS demo. A mixed grid of PBR spheres and slowly
-//! spinning cubes under all three shadow-casting light types at once:
+//! AMBIENT OCCLUSION demo.
 //!
-//!   * a cascaded directional sun,
-//!   * a sweeping spot light with its own perspective shadow map,
-//!   * a point light in the middle of the grid casting in all six directions,
+//! Built to make SSAO legible rather than to stress the renderer, which means
+//! three deliberate choices:
 //!
-//! plus as many unshadowed moving point lights as you care to add, to keep the
-//! froxel grid honest.
+//!   * MATTE, LIGHT, NON-METALLIC materials. Occlusion scales the ambient
+//!     DIFFUSE term. A metal has almost no diffuse response, and a dark albedo
+//!     has little to darken, so either one hides the effect completely — it
+//!     looks like a broken feature when it is working correctly.
+//!   * AMBIENT-DOMINANT LIGHTING. A strong sun swamps ambient, and AO does not
+//!     touch direct light at all (that is what shadow maps are for). The sun
+//!     here is deliberately weak, and key 7 removes it entirely.
+//!   * CONTACT-HEAVY GEOMETRY. Occlusion lives where surfaces meet: inside
+//!     corners, under objects resting on the floor, in the gap between two
+//!     boxes pushed together. A field of well-spaced spheres shows almost none.
 //!
-//! Watching all three together is the point: each light's shadow only removes
-//! that light's contribution, so where the sun's shadow and the spot's shadow
-//! cross you get a third, darker region rather than either cancelling out.
+//! Deferred only — SSAO reads the G-buffer's normals, which the forward path
+//! does not produce.
 //!
 //! Keys:
-//!   6   add 16 point lights      7   remove 16
-//!   8   toggle light motion      9   toggle the shadowed point light
-//!   1..5  AA (raw / FXAA / FXAA-quality / SSAA / both)   0  AA off
+//!   1  SSAO on/off        2/3  radius -/+       4/5  intensity -/+
+//!   6  half-res on/off    7    sun on/off       8    ambient -/+ (cycles)
 
 const std = @import("std");
 const zupra = @import("zupra");
@@ -30,6 +34,8 @@ const Light = zupra.render.Light;
 const LightHandle = zupra.render.LightHandle;
 const Environment = zupra.render.Environment;
 const Camera2D = zupra.render.Camera2D;
+const Sprite = zupra.graphics.texture.Sprite;
+const TextureRegion = zupra.graphics.texture.TextureRegion;
 
 var gpa: std.mem.Allocator = undefined;
 
@@ -38,131 +44,66 @@ var scene: zupra.render.SceneRenderer = undefined;
 var cam: zupra.render.Camera3D = undefined;
 var env: Environment = undefined;
 var controller: zupra.render.FirstPersonController = undefined;
-var envmap: zupra.render.EnvironmentMap = undefined;
-var envmap_ok = false;
 
 var font: zupra.render.Font = undefined;
 var batch: zupra.render.SpriteBatch = undefined;
 var ui_cam: Camera2D = undefined;
 var text: zupra.render.TextBatch2D = undefined;
 
+// Every surface is the same matte off-white. Uniform material is the point:
+// with nothing else varying, any shading difference on screen is geometry-driven
+// occlusion rather than a material property.
+const chalk = Material{
+    .base_color = .{ .r = 0.82, .g = 0.80, .b = 0.78, .a = 1 },
+    .metallic = 0.0,
+    .roughness = 0.95,
+};
+
 var floor_model: Model = undefined;
+var wall_model: Model = undefined;
+var block_model: Model = undefined;
+var small_model: Model = undefined;
+var pillar_model: Model = undefined;
+var ball_model: Model = undefined;
 
-/// One surface look. Six of them, each built once as a sphere and again as a
-/// cube, so the grid can mix shape and material independently.
-const Look = struct {
-    color: zupra.Color,
-    metallic: f32,
-    roughness: f32,
-};
+var sun: LightHandle = undefined;
+var sun_on = true;
 
-const palette = [_]Look{
-    .{ .color = .{ .r = 0.90, .g = 0.90, .b = 0.92, .a = 1 }, .metallic = 1.0, .roughness = 0.18 }, // polished steel
-    .{ .color = .{ .r = 0.85, .g = 0.30, .b = 0.32, .a = 1 }, .metallic = 0.0, .roughness = 0.55 }, // red plastic
-    .{ .color = .{ .r = 0.20, .g = 0.45, .b = 0.80, .a = 1 }, .metallic = 0.0, .roughness = 0.35 }, // blue enamel
-    .{ .color = .{ .r = 0.95, .g = 0.75, .b = 0.25, .a = 1 }, .metallic = 1.0, .roughness = 0.32 }, // gold
-    .{ .color = .{ .r = 0.25, .g = 0.65, .b = 0.40, .a = 1 }, .metallic = 0.0, .roughness = 0.75 }, // matte green
-    .{ .color = .{ .r = 0.55, .g = 0.35, .b = 0.75, .a = 1 }, .metallic = 0.3, .roughness = 0.28 }, // violet
-};
+const ambient_steps = [_]f32{ 0.10, 0.20, 0.35, 0.50 };
+var ambient_index: usize = 2;
 
-var sphere_models: [palette.len]Model = undefined;
-var cube_models: [palette.len]Model = undefined;
-
-const grid_x = 8;
-const grid_z = 8;
-const grid_spacing: f32 = 3.0;
-
-const PointMover = struct {
-    handle: LightHandle,
-    center: [3]f32,
-    radius: f32,
-    speed: f32,
-    phase: f32,
-    height: f32,
-    bob: f32,
-};
-var movers: std.ArrayList(PointMover) = .empty;
-var lights_move = true;
-var elapsed: f32 = 0;
-
-var spot_light: LightHandle = undefined;
-var point_light: LightHandle = undefined;
-var point_shadow_on = true;
-
-var rng = std.Random.DefaultPrng.init(0x9E3779B97F4A7C15);
+/// Draw the raw occlusion buffer over the scene. The most direct question you
+/// can ask the pass -- white where open, dark in creases. An all-black or
+/// all-white buffer is instantly recognisable here and nearly impossible to
+/// diagnose from the lit image alone.
+var show_ao_buffer = false;
 
 var fps_accum: f32 = 0;
 var fps_frames: u32 = 0;
-var fps_buf: [192]u8 = undefined;
+var fps_buf: [256]u8 = undefined;
 var fps_text: []const u8 = "";
 
 pub fn main(ctx: std.process.Init) !void {
     zupra.init(ctx, .{ .initFn = init, .renderFn = render, .deinitFn = deinit, .eventFn = onEvent });
 }
 
-fn randF(lo: f32, hi: f32) f32 {
-    return lo + rng.random().float(f32) * (hi - lo);
-}
-
-fn randColor() zupra.Color {
-    return .{ .r = randF(0.2, 1.0), .g = randF(0.2, 1.0), .b = randF(0.2, 1.0), .a = 1 };
-}
-
-fn addMover() void {
-    const center = [3]f32{
-        randF(-grid_x * grid_spacing * 0.5, grid_x * grid_spacing * 0.5),
-        randF(1.0, 3.0),
-        randF(-grid_z * grid_spacing * 0.5, grid_z * grid_spacing * 0.5),
-    };
-    const handle = env.addLight(Light.point(
-        .{ .x = center[0], .y = center[1], .z = center[2] },
-        randColor(),
-        randF(8.0, 16.0),
-        randF(4.0, 7.0), // range = the clustering cull bound; keep it tight
-    )) catch return;
-
-    movers.append(gpa, .{
-        .handle = handle,
-        .center = center,
-        .radius = randF(1.5, 5.0),
-        .speed = randF(0.3, 1.2) * (if (rng.random().boolean()) @as(f32, 1) else -1),
-        .phase = randF(0, std.math.tau),
-        .height = center[1],
-        .bob = randF(0.3, 1.2),
-    }) catch {};
-}
-
-fn removeMovers(n: usize) void {
-    var i: usize = 0;
-    while (i < n and movers.items.len > 0) : (i += 1) {
-        const m = movers.pop().?;
-        env.removeLight(m.handle);
-    }
+fn applyAmbient() void {
+    const a = ambient_steps[ambient_index];
+    env.ambient = .{ .r = a, .g = a * 0.99, .b = a * 0.97, .a = 1 };
 }
 
 pub fn init() void {
     gpa = zupra.getGPA();
     cache = .init(gpa);
-    scene = zupra.render.SceneRenderer.init(gpa, &cache, .forward, 1280, 720);
+
+    // Deferred: SSAO needs G-buffer normals.
+    scene = zupra.render.SceneRenderer.init(gpa, &cache, .deferred, 1280, 720);
     scene.setAAMethod(.fxaa);
 
-    if (zupra.render.EnvironmentMap.initFromCubeFaces(&cache, gpa, .{
-        @embedFile("assets/skybox/sun_cubemap/posx.jpg"),
-        @embedFile("assets/skybox/sun_cubemap/negx.jpg"),
-        @embedFile("assets/skybox/sun_cubemap/posy.jpg"),
-        @embedFile("assets/skybox/sun_cubemap/negy.jpg"),
-        @embedFile("assets/skybox/sun_cubemap/posz.jpg"),
-        @embedFile("assets/skybox/sun_cubemap/negz.jpg"),
-    }, 2048)) |em| {
-        envmap = em;
-        envmap_ok = true;
-        scene.setEnvironmentMap(&envmap);
-    } else |err| {
-        std.log.warn("no cubemap ({}), falling back to the procedural sky", .{err});
-    }
-
     cam = zupra.render.Camera3D.init(16.0 / 9.0);
-    controller = .init(.{ .x = 0, .y = 6, .z = -18 });
+    // Low and close. AO is a contact-scale effect; from a distance the contact
+    // shadows are a few pixels wide and invisible.
+    controller = .init(.{ .x = 6, .y = 2.4, .z = -9 });
 
     font = zupra.render.Font.initFromMemory(gpa, @embedFile("assets/OpenSans-Regular.ttf"), .{}) catch unreachable;
     batch = zupra.render.SpriteBatch.init(gpa, &cache, .{}) catch unreachable;
@@ -170,147 +111,63 @@ pub fn init() void {
     text = zupra.render.TextBatch2D.init(&font, &batch);
 
     env = Environment.init(gpa);
-    env.ambient = .{ .r = 0.03, .g = 0.03, .b = 0.04, .a = 1 };
+    applyAmbient();
 
-    // ---------------------------------------------------------------------
-    //  Lights
-    //
-    //  ATLAS BUDGET. Every shadowed light competes for tiles in one 4096
-    //  atlas, and a point light is six of them. This set comes to 4x1024
-    //  (sun) + 1x1024 (spot) + 6x512 (point) = 11 tiles. Raising the sun to
-    //  2048 would alone consume most of the atlas and starve the other two --
-    //  which is exactly the trade a real scene has to make, so it's worth
-    //  seeing here rather than hiding behind a bigger atlas.
-    // ---------------------------------------------------------------------
-
-    // const sun = env.addLight(Light.directional(
-    //     .{ .x = -0.5, .y = -1.0, .z = -0.35 },
-    //     .{ .r = 1.0, .g = 0.96, .b = 0.9, .a = 1 },
-    //     3.0,
-    // )) catch unreachable;
-    // if (env.getLight(sun)) |l| {
-    //     l.shadow = .{ .enabled = true, .resolution = 1024, .cascade_count = 4, .max_distance = 60 };
-    // }
-
-    // Sweeps a circle overhead each frame (see render). Aimed inward and down,
-    // so its cone crosses the sun's shadows at a steep angle and the two sets
-    // of shadows stay easy to tell apart.
-    spot_light = env.addLight(Light.spot(
-        .{ .x = -10, .y = 10, .z = -8 },
-        .{ .x = 0.7, .y = -1.0, .z = 0.55 },
-        .{ .r = 1.0, .g = 0.93, .b = 0.75, .a = 1 },
-        150.0, // inverse-square falloff, so far higher than the sun's 3.0
-        36.0, // range: also the shadow far plane and the clustering bound
-        16.0,
-        24.0, // outer angle IS the shadow frustum's half-angle
+    // Weak sun, angled so the corner walls stay partly self-shaded. Its job is
+    // to give the scene some form, not to light it — turn it off with 7 and the
+    // remaining image is pure ambient, which is where AO does all its work.
+    sun = env.addLight(Light.directional(
+        .{ .x = -0.45, .y = -1.0, .z = -0.30 },
+        .{ .r = 1.0, .g = 0.97, .b = 0.92, .a = 1 },
+        0.8,
     )) catch unreachable;
-    if (env.getLight(spot_light)) |l| {
-        l.shadow = .{ .enabled = true, .resolution = 1024, .cascade_count = 1, .max_distance = 90 };
+    if (env.getLight(sun)) |l| {
+        l.shadow = .{ .enabled = true, .resolution = 1024, .cascade_count = 3, .max_distance = 45 };
     }
 
-    // Sits low in the middle of the grid so its six faces all have something to
-    // cast: shadows radiate outward in every direction from one source.
-    point_light = env.addLight(Light.point(
-        .{ .x = 0, .y = 2.2, .z = 0 },
-        .{ .r = 0.55, .g = 0.85, .b = 1.0, .a = 1 },
-        60.0,
-        14.0,
-    )) catch unreachable;
-    if (env.getLight(point_light)) |l| {
-        // 512 per face, not 1024: six tiles at 1024 is a quarter of the atlas
-        // for one light. Faces are only ever seen from inside the light's
-        // range, so they need less resolution than they look like they should.
-        l.shadow = .{ .enabled = true, .resolution = 512, .cascade_count = 1, .max_distance = 60 };
-    }
+    floor_model = Model.fromMesh(gpa, MeshBuilder.plane(40, 40), chalk) catch unreachable;
+    wall_model = Model.fromMesh(gpa, MeshBuilder.cube(14, 5, 0.4), chalk) catch unreachable;
+    block_model = Model.fromMesh(gpa, MeshBuilder.cube(2, 2, 2), chalk) catch unreachable;
+    small_model = Model.fromMesh(gpa, MeshBuilder.cube(0.9, 0.9, 0.9), chalk) catch unreachable;
+    pillar_model = Model.fromMesh(gpa, MeshBuilder.cube(0.7, 4.5, 0.7), chalk) catch unreachable;
+    ball_model = Model.fromMesh(gpa, MeshBuilder.sphere(gpa, 0.85, 32, 32) catch unreachable, chalk) catch unreachable;
+}
 
-    // ---------------------------------------------------------------------
-    //  Geometry
-    // ---------------------------------------------------------------------
+fn place(model: *Model, x: f32, y: f32, z: f32) void {
+    var inst = model.instance();
+    inst.setPosition(.{ .x = x, .y = y, .z = z });
+    scene.draw(inst);
+}
 
-    floor_model = Model.fromMesh(gpa, MeshBuilder.plane(48, 48), .{
-        .base_color = .{ .r = 0.5, .g = 0.5, .b = 0.55, .a = 1 },
-        .metallic = 0.0,
-        .roughness = 0.9,
-    }) catch unreachable;
-
-    for (palette, 0..) |look, i| {
-        const mat = Material{
-            .base_color = look.color,
-            .metallic = look.metallic,
-            .roughness = look.roughness,
-        };
-        sphere_models[i] = Model.fromMesh(
-            gpa,
-            MeshBuilder.sphere(gpa, 0.9, 32, 32) catch unreachable,
-            mat,
-        ) catch unreachable;
-        cube_models[i] = Model.fromMesh(gpa, MeshBuilder.cube(1.5, 1.5, 1.5), mat) catch unreachable;
-    }
+fn placeRotated(model: *Model, x: f32, y: f32, z: f32, angle: f32) void {
+    var inst = model.instance();
+    inst.setPosition(.{ .x = x, .y = y, .z = z });
+    inst.setRotationAxisAngle(.{ .x = 0, .y = 1, .z = 0 }, angle);
+    scene.draw(inst);
 }
 
 pub fn render() void {
     const dt = zupra.app.getDelta();
-    if (lights_move) elapsed += dt;
 
+    if (zupra.input.isKeyJustPressed(._1)) scene.ssao_enabled = !scene.ssao_enabled;
+    if (zupra.input.isKeyJustPressed(._2)) scene.ssao.settings.radius = @max(0.05, scene.ssao.settings.radius - 0.1);
+    if (zupra.input.isKeyJustPressed(._3)) scene.ssao.settings.radius = @min(4.0, scene.ssao.settings.radius + 0.1);
+    if (zupra.input.isKeyJustPressed(._4)) scene.ssao.settings.intensity = @max(0.0, scene.ssao.settings.intensity - 0.1);
+    if (zupra.input.isKeyJustPressed(._5)) scene.ssao.settings.intensity = @min(3.0, scene.ssao.settings.intensity + 0.1);
     if (zupra.input.isKeyJustPressed(._6)) {
-        var i: usize = 0;
-        while (i < 16) : (i += 1) addMover();
+        scene.ssao.settings.half_resolution = !scene.ssao.settings.half_resolution;
+        // rebuild, not resize: the window size hasn't changed, so resize would
+        // early-out and leave the targets at the old scale.
+        scene.ssao.rebuild(scene.width, scene.height);
     }
-    if (zupra.input.isKeyJustPressed(._7)) removeMovers(16);
-    if (zupra.input.isKeyJustPressed(._8)) lights_move = !lights_move;
-
-    // Toggling this is the clearest way to see what six tiles actually buy:
-    // shadows radiating from the centre appear and vanish, and the caster count
-    // in the overlay jumps by six.
-    if (zupra.input.isKeyJustPressed(._9)) {
-        point_shadow_on = !point_shadow_on;
-        if (env.getLight(point_light)) |l| l.shadow.enabled = point_shadow_on;
+    if (zupra.input.isKeyJustPressed(._9)) show_ao_buffer = !show_ao_buffer;
+    if (zupra.input.isKeyJustPressed(._7)) {
+        sun_on = !sun_on;
+        if (env.getLight(sun)) |l| l.intensity = if (sun_on) 0.8 else 0.0;
     }
-
-    if (zupra.input.isKeyJustPressed(._1)) {
-        scene.setAAMethod(.none);
-        scene.setRenderScale(1);
-    } else if (zupra.input.isKeyJustPressed(._2)) {
-        scene.setAAMethod(.fxaa);
-        scene.setRenderScale(1);
-    } else if (zupra.input.isKeyJustPressed(._3)) {
-        scene.setAAMethod(.fxaa_quality);
-        scene.setRenderScale(1);
-    } else if (zupra.input.isKeyJustPressed(._4)) {
-        scene.setAAMethod(.none);
-        scene.setRenderScale(2);
-    } else if (zupra.input.isKeyJustPressed(._5)) {
-        scene.setAAMethod(.fxaa);
-        scene.setRenderScale(2);
-    } else if (zupra.input.isKeyJustPressed(._0)) {
-        scene.setAAMethod(.none);
-        scene.setRenderScale(1);
-    }
-
-    if (lights_move) {
-        // Orbit + bob each unshadowed point light, via its stable handle.
-        for (movers.items) |m| {
-            if (env.getLight(m.handle)) |l| {
-                const a = m.phase + elapsed * m.speed;
-                l.position = .{
-                    .x = m.center[0] + @cos(a) * m.radius,
-                    .y = m.height + @sin(elapsed * 1.7 + m.phase) * m.bob,
-                    .z = m.center[2] + @sin(a) * m.radius,
-                };
-            }
-        }
-
-        // Walk the spot around the grid, always aimed at the centre. Moving the
-        // light rather than the geometry is the honest test of the shadow map:
-        // the whole frustum is refitted every frame, so any instability in the
-        // projection shows up as swimming shadows.
-        if (env.getLight(spot_light)) |l| {
-            const a = elapsed * 0.35;
-            const px = @cos(a) * 13.0;
-            const pz = @sin(a) * 13.0;
-            l.position = .{ .x = px, .y = 11.0, .z = pz };
-            l.direction = .{ .x = -px, .y = -11.0, .z = -pz };
-        }
+    if (zupra.input.isKeyJustPressed(._8)) {
+        ambient_index = (ambient_index + 1) % ambient_steps.len;
+        applyAmbient();
     }
 
     controller.update(dt);
@@ -318,69 +175,90 @@ pub fn render() void {
 
     scene.begin(cam, &env);
 
-    var floor = floor_model.instance();
-    floor.setPosition(.{ .x = 0, .y = 0, .z = 0 });
-    scene.draw(floor);
+    place(&floor_model, 0, 0, 0);
 
-    var gz: usize = 0;
-    while (gz < grid_z) : (gz += 1) {
-        var gx: usize = 0;
-        while (gx < grid_x) : (gx += 1) {
-            const px = (@as(f32, @floatFromInt(gx)) - grid_x * 0.5 + 0.5) * grid_spacing;
-            const pz = (@as(f32, @floatFromInt(gz)) - grid_z * 0.5 + 0.5) * grid_spacing;
+    // An inside corner. Two walls meeting is the textbook AO case: the seam
+    // where they join, and both seams where they meet the floor, should darken
+    // gradually rather than reading as three flat planes butted together.
+    placeRotated(&wall_model, 0, 2.5, 7.0, 0);
+    placeRotated(&wall_model, -7.0, 2.5, 0, std.math.pi * 0.5);
 
-            // Coprime strides so shape and colour cycle at different rates and
-            // the grid doesn't fall into an obvious stripe.
-            const look = (gx * 5 + gz * 3) % palette.len;
-            const is_cube = (gx + gz * 3) % 3 == 0;
+    // Blocks pushed together with narrow gaps. The gaps matter more than the
+    // blocks: a 0.3-unit slot between two boxes is exactly the scale `radius`
+    // controls, so widening the radius past ~1.0 washes these out.
+    place(&block_model, -4.0, 1.0, 3.0);
+    place(&block_model, -1.7, 1.0, 3.0);
+    place(&block_model, -2.85, 3.0, 3.0); // stacked across the seam below
 
-            if (is_cube) {
-                var inst = cube_models[look].instance();
-                inst.setPosition(.{ .x = px, .y = 0.75, .z = pz });
-                // A turning box is the best shadow test in the scene: its
-                // silhouette changes every frame, so a stale or cached map
-                // would be obvious immediately.
-                inst.setRotationAxisAngle(
-                    .{ .x = 0, .y = 1, .z = 0 },
-                    elapsed * 0.5 + @as(f32, @floatFromInt(gx + gz)),
-                );
-                scene.draw(inst);
-            } else {
-                var inst = sphere_models[look].instance();
-                inst.setPosition(.{ .x = px, .y = 0.9, .z = pz });
-                scene.draw(inst);
-            }
-        }
+    // Small blocks nestled into the corner between a big block and the floor.
+    place(&small_model, 0.9, 0.45, 3.0);
+    place(&small_model, 1.85, 0.45, 3.0);
+    place(&small_model, 1.4, 1.35, 3.0);
+
+    // Pillars, spaced to close up as you walk past — the gap between them
+    // darkens progressively, which shows the falloff is smooth rather than a
+    // hard threshold.
+    var i: usize = 0;
+    while (i < 4) : (i += 1) {
+        const x = -5.0 + @as(f32, @floatFromInt(i)) * 1.1;
+        place(&pillar_model, x, 2.25, 5.6);
     }
+
+    // Balls resting ON the floor, not floating above it. The contact ring under
+    // each is the single clearest read on whether AO is working: without it
+    // they look pasted onto the surface.
+    place(&ball_model, 2.5, 0.85, 0.5);
+    place(&ball_model, 4.2, 0.85, 1.2);
+    place(&ball_model, 3.3, 0.85, 2.4); // three in a cluster, mutually occluding
+
+    // One ball tucked against a block, so occlusion appears on the vertical face
+    // too and not only on the ground.
+    place(&block_model, -0.5, 1.0, -2.0);
+    place(&ball_model, 1.0, 0.85, -2.0);
+
     scene.end();
 
     fps_accum += dt;
     fps_frames += 1;
     if (fps_accum >= 0.25) {
         const fps = @as(f32, @floatFromInt(fps_frames)) / fps_accum;
-        // Caster count is the shadow system's real cost signal: one depth pass
-        // per caster per frame. Sun cascades + spot + point faces, so it should
-        // read 11 with everything on and 5 with the point light's shadow off.
-        // shadow_draws is the depth draws that survived per-view culling; the
-        // uncalled number is queue length times caster count, so the two
-        // together show exactly what the frustum test is rejecting.
-        // Three numbers, and the gaps between them are the story: draws is what
-        // the GPU is actually told to do, instances is what survived culling,
-        // and uncalled is what a naive loop would have submitted.
-        const uncalled = scene.shadow_queue.items.len * scene.shadows.casters.items.len;
-        fps_text = std.fmt.bufPrint(&fps_buf, "{d:.0} FPS {d:.2} ms  lights: {d}  visible: {d}/{d}  casters: {d}  shadow: {d} ({d}/{d})", .{
-            fps,                 1000.0 / fps,           env.lightCount(),
-            scene.visible_draws, scene.submitted_draws,  scene.shadows.casters.items.len,
-            scene.shadow_draws,  scene.shadow_instances, uncalled,
-        }) catch "FPS ?";
+        const s = scene.ssao.settings;
+        fps_text = std.fmt.bufPrint(
+            &fps_buf,
+            "{d:.0} FPS {d:.2} ms | SSAO {s} r={d:.2} i={d:.2} {s} | sun {s} | ambient {d:.2}  [1 ssao  2/3 radius  4/5 intensity  6 res  7 sun  8 ambient  9 view AO]",
+            .{
+                fps,                                     1000.0 / fps,
+                if (scene.ssao_enabled) "ON" else "OFF", s.radius,
+                s.intensity,                             if (s.half_resolution) "half" else "full",
+                if (sun_on) "on" else "off",             ambient_steps[ambient_index],
+            },
+        ) catch "FPS ?";
         fps_accum = 0;
         fps_frames = 0;
     }
 
     ui_cam.setViewport(sokol.app.widthf(), sokol.app.heightf());
     zupra.beginDrawing();
+
+    if (show_ao_buffer) {
+        // Stretch the AO target over the whole window. It's R8, so the sprite
+        // shader shows occlusion in the red channel -- open areas read bright,
+        // creases dark. Colour is irrelevant here; the spatial pattern is the
+        // whole point.
+        var ao_sprite = Sprite.init(TextureRegion.full(scene.ssao.debugTexture()));
+        ao_sprite.dest = .{
+            .x = 0,
+            .y = 0,
+            .width = sokol.app.widthf(),
+            .height = sokol.app.heightf(),
+        };
+        batch.begin(ui_cam, .none);
+        batch.draw(ao_sprite);
+        batch.end();
+    }
+
     text.begin(ui_cam);
-    text.draw(fps_text, 12, 12, 0.4, zupra.colors.WHITE);
+    text.draw(fps_text, 12, 12, 0.34, zupra.colors.WHITE);
     text.end();
     zupra.endDrawing();
 }
@@ -390,14 +268,15 @@ pub fn onEvent(event: *const zupra.Event) void {
 }
 
 pub fn deinit() void {
-    movers.deinit(gpa);
     font.deinit();
     batch.deinit(gpa);
     floor_model.deinit();
-    for (&sphere_models) |*m| m.deinit();
-    for (&cube_models) |*m| m.deinit();
+    wall_model.deinit();
+    block_model.deinit();
+    small_model.deinit();
+    pillar_model.deinit();
+    ball_model.deinit();
     env.deinit();
     scene.deinit();
     cache.deinit();
-    if (envmap_ok) envmap.deinit();
 }
