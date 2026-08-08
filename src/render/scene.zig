@@ -54,6 +54,7 @@ const Skybox = @import("skybox.zig").Skybox;
 const Ibl = @import("ibl.zig").Ibl;
 const PostChain = @import("posprocess.zig").PostChain;
 const AAMethod = @import("posprocess.zig").AAMethod;
+const EnvironmentMap = @import("render.zig").EnvironmentMap;
 
 const ShadowRenderer = @import("shadow_renderer.zig").ShadowRenderer;
 const ShadowParams = @import("shaders").mesh.ShadowParams;
@@ -125,6 +126,11 @@ pub const SceneRenderer = struct {
     skybox: ?Skybox = null,
     ibl: ?Ibl = null,
     ibl_baked: bool = false,
+
+    /// Captured environment. When set it replaces the procedural sky, both as
+    /// the visible background and as the source the IBL chain bakes from.
+    /// SceneRenderer doesn't own it, an environment map is commonly shared between scenes and is expensive to duplicate.
+    envmap: ?*EnvironmentMap = null,
 
     shadows: ShadowRenderer,
     shadow_params: ShadowParams = undefined,
@@ -243,6 +249,14 @@ pub const SceneRenderer = struct {
         self.width = 0; // force ensureSize to recreate the target next frame
     }
 
+    /// Swap the environment. Clears ibl_baked so irradiance and the specular
+    /// prefilter are rebuilt from the new source on the next frame -> leaving the
+    /// old bake in place would light the scene from an environment no longer visible behind it.
+    pub fn setEnvironmentMap(self: *SceneRenderer, map: ?*EnvironmentMap) void {
+        self.envmap = map;
+        self.ibl_baked = false;
+    }
+
     fn makeSceneColor(self: *SceneRenderer, mode: ShadingMode, w: u32, h: u32) Framebuffer {
         return Framebuffer.init(.{
             .width = w,
@@ -309,7 +323,7 @@ pub const SceneRenderer = struct {
         if (!self.ibl_baked) {
             if (self.ibl) |*ibl| {
                 if (self.skybox) |*sky| {
-                    ibl.bake(sky);
+                    ibl.bake(sky, self.envmap);
                     self.ibl_baked = true;
                 }
             }
@@ -566,8 +580,11 @@ pub const SceneRenderer = struct {
         }));
         const sig = self.scene_color.passSignatureWith(.DEPTH);
 
-        // Sky first (fills background; geometry occludes it via depth test).
-        if (self.skybox) |*sky| sky.render(self.camera, sig);
+        if (self.envmap) |em| {
+            em.render(self.camera, sig);
+        } else if (self.skybox) |*s| {
+            s.render(self.camera, sig);
+        }
 
         // Then sorted transparents over everything.
         if (has_transparent) {

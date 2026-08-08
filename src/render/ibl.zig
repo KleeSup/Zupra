@@ -24,6 +24,7 @@ const cubemap = @import("cubemap.zig");
 const Cubemap = cubemap.Cubemap;
 const FullscreenTriangle = @import("fullscreen.zig").FullscreenTriangle;
 const Skybox = @import("skybox.zig").Skybox;
+const EnvironmentMap = @import("render.zig").EnvironmentMap;
 
 const shd_irr = @import("shaders").irradiance;
 const shd_pre = @import("shaders").prefilter;
@@ -97,7 +98,7 @@ pub const Ibl = struct {
 
     /// Run both bake stages. Call inside a frame (passes need a commit), once —
     /// the result is static unless the environment changes.
-    pub fn bake(self: *Ibl, skybox: *Skybox) void {
+    pub fn bake(self: *Ibl, skybox: *Skybox, envmap: ?*EnvironmentMap) void {
         const face_vps = cubemap.faceViewProjections();
         const origin = Vec3{ .x = 0, .y = 0, .z = 0 };
 
@@ -106,7 +107,11 @@ pub const Ibl = struct {
         for (0..6) |face| {
             const inv_vp = zm.inverse(face_vps[face]);
             zupra.beginDrawingPass(facePass(self.env_cube.faceAttachment(@intCast(face), 0)));
-            skybox.renderRaw(inv_vp, origin, env_sig, false);
+            if (envmap) |em| {
+                em.renderRaw(inv_vp, origin, env_sig, false);
+            } else {
+                skybox.renderRaw(inv_vp, origin, env_sig, false);
+            }
             zupra.endDrawing();
         }
 

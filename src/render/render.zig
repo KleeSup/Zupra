@@ -38,6 +38,7 @@ pub const SceneRenderer = @import("scene.zig").SceneRenderer;
 pub const Skybox = @import("skybox.zig").Skybox;
 pub const Cubemap = @import("cubemap.zig").Cubemap;
 pub const Ibl = @import("ibl.zig").Ibl;
+pub const EnvironmentMap = @import("envmap.zig").EnvironmentMap;
 
 pub const ShadowAtlas = @import("shadow.zig").ShadowAtlas;
 pub const ShadowCaster = @import("shadow.zig").ShadowCaster;

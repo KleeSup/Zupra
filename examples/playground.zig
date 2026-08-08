@@ -38,6 +38,8 @@ var scene: zupra.render.SceneRenderer = undefined;
 var cam: zupra.render.Camera3D = undefined;
 var env: Environment = undefined;
 var controller: zupra.render.FirstPersonController = undefined;
+var envmap: zupra.render.EnvironmentMap = undefined;
+var envmap_ok = false;
 
 var font: zupra.render.Font = undefined;
 var batch: zupra.render.SpriteBatch = undefined;
@@ -144,6 +146,21 @@ pub fn init() void {
     scene = zupra.render.SceneRenderer.init(gpa, &cache, .forward, 1280, 720);
     scene.setAAMethod(.fxaa);
 
+    if (zupra.render.EnvironmentMap.initFromCubeFaces(&cache, gpa, .{
+        @embedFile("assets/skybox/sun_cubemap/posx.jpg"),
+        @embedFile("assets/skybox/sun_cubemap/negx.jpg"),
+        @embedFile("assets/skybox/sun_cubemap/posy.jpg"),
+        @embedFile("assets/skybox/sun_cubemap/negy.jpg"),
+        @embedFile("assets/skybox/sun_cubemap/posz.jpg"),
+        @embedFile("assets/skybox/sun_cubemap/negz.jpg"),
+    }, 2048)) |em| {
+        envmap = em;
+        envmap_ok = true;
+        scene.setEnvironmentMap(&envmap);
+    } else |err| {
+        std.log.warn("no cubemap ({}), falling back to the procedural sky", .{err});
+    }
+
     cam = zupra.render.Camera3D.init(16.0 / 9.0);
     controller = .init(.{ .x = 0, .y = 6, .z = -18 });
 
@@ -166,14 +183,14 @@ pub fn init() void {
     //  seeing here rather than hiding behind a bigger atlas.
     // ---------------------------------------------------------------------
 
-    const sun = env.addLight(Light.directional(
-        .{ .x = -0.5, .y = -1.0, .z = -0.35 },
-        .{ .r = 1.0, .g = 0.96, .b = 0.9, .a = 1 },
-        3.0,
-    )) catch unreachable;
-    if (env.getLight(sun)) |l| {
-        l.shadow = .{ .enabled = true, .resolution = 1024, .cascade_count = 4, .max_distance = 60 };
-    }
+    // const sun = env.addLight(Light.directional(
+    //     .{ .x = -0.5, .y = -1.0, .z = -0.35 },
+    //     .{ .r = 1.0, .g = 0.96, .b = 0.9, .a = 1 },
+    //     3.0,
+    // )) catch unreachable;
+    // if (env.getLight(sun)) |l| {
+    //     l.shadow = .{ .enabled = true, .resolution = 1024, .cascade_count = 4, .max_distance = 60 };
+    // }
 
     // Sweeps a circle overhead each frame (see render). Aimed inward and down,
     // so its cone crosses the sun's shadows at a steep angle and the two sets
@@ -382,4 +399,5 @@ pub fn deinit() void {
     env.deinit();
     scene.deinit();
     cache.deinit();
+    if (envmap_ok) envmap.deinit();
 }
