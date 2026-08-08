@@ -20,6 +20,7 @@ const Camera3D = @import("camera3d.zig").Camera3D;
 const zupra = @import("../root.zig");
 
 const shd_depth = @import("shaders").shadow_depth;
+const shd_depth_inst = @import("shaders").shadow_depth_instanced;
 
 const Matrix = math.Matrix;
 const Vec3 = math.Vec3;
@@ -48,6 +49,11 @@ pub const max_cascades = 4;
 /// A ragged layout would need an offset table and another indirection in the
 /// shader to save a few kilobytes of uniform space.
 pub const max_shadow_views = 6;
+
+/// Instance-buffer capacity, in bytes: 16384 model matrices at 64 bytes each.
+/// The whole frame's batched shadow draws sub-allocate from this one buffer,
+/// so it has to cover queue length times view count, not just queue length.
+const max_instance_bytes = 16384 * 16 * @sizeOf(f32);
 /// Max simultaneously shadowed lights (any type). The shadow_data shader array
 /// is sized to this. Generous, but each entry is small.
 pub const max_shadowed = 16;
@@ -89,6 +95,14 @@ pub const ShadowRenderer = struct {
 
     /// Casters built this frame (all lights, all cascades/faces).
     casters: std.ArrayListUnmanaged(ShadowCaster) = .empty,
+
+    /// Instanced depth shader + the streaming buffer its per-instance matrices
+    /// come from. One buffer for the whole frame, sub-allocated per draw with
+    /// sg.appendBuffer -- sokol allows a buffer only ONE updateBuffer per frame,
+    /// but any number of appends, which is exactly the shape of "many small
+    /// uploads across many passes".
+    inst_shader: sg.Shader = .{},
+    inst_buf: sg.Buffer = .{},
     /// Per-shadowed-light data, uploaded to the lighting shader.
     data: [max_shadowed]ShadowData = undefined,
     data_count: u32 = 0,
@@ -96,6 +110,15 @@ pub const ShadowRenderer = struct {
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, cache: *PipelineCache, opts: shadow.AtlasOptions) ShadowRenderer {
+        const inst_shader = sg.makeShader(shd_depth_inst.shadowDepthInstancedShaderDesc(sg.queryBackend()));
+        // Sized for the worst realistic frame: every queued caster drawn into
+        // every view. Overflowing is not a crash -- sokol flags the buffer and
+        // drops the appends -- but it silently loses shadows, so the check in
+        // drawMeshInstanced reports it instead of failing quietly.
+        const inst_buf = sg.makeBuffer(.{
+            .size = max_instance_bytes,
+            .usage = .{ .vertex_buffer = true, .stream_update = true },
+        });
         const shader = sg.makeShader(shd_depth.shadowDepthShaderDesc(sg.queryBackend()));
         // Diagnostic: if the depth-only shader failed to compile, every shadow
         // draw will die at apply_uniforms with "pipeline no longer alive". Catch
@@ -104,10 +127,16 @@ pub const ShadowRenderer = struct {
         if (state != .VALID) {
             std.log.err("ShadowRenderer: shadow_depth shader is {s} (not VALID) — depth pass will fail", .{@tagName(state)});
         }
+        const inst_state = sg.queryShaderState(inst_shader);
+        if (inst_state != .VALID) {
+            std.log.err("ShadowRenderer: shadow_depth_instanced shader is {s} (not VALID) — batched depth draws will fail", .{@tagName(inst_state)});
+        }
         return .{
             .cache = cache,
             .atlas = ShadowAtlas.init(opts),
             .shader = shader,
+            .inst_shader = inst_shader,
+            .inst_buf = inst_buf,
             .allocator = allocator,
         };
     }
@@ -115,6 +144,8 @@ pub const ShadowRenderer = struct {
     pub fn deinit(self: *ShadowRenderer) void {
         self.casters.deinit(self.allocator);
         self.atlas.deinit();
+        sg.destroyBuffer(self.inst_buf);
+        sg.destroyShader(self.inst_shader);
         sg.destroyShader(self.shader);
     }
 
@@ -478,6 +509,71 @@ pub const ShadowRenderer = struct {
         sg.applyBindings(bindings);
         sg.applyUniforms(shd_depth.UB_vs_params, sg.asRange(&vs));
         sg.draw(0, mesh.index_count, 1);
+    }
+
+    /// Draw one mesh once per supplied model matrix, as a single instanced draw.
+    ///
+    /// `models` are row-major matrices in the engine's usual layout; they go to
+    /// the GPU untouched and the shader reconstructs them (see the note in
+    /// shadow_depth_instanced.glsl about rows becoming columns).
+    ///
+    /// The batch key upstream is the MESH, not the material -- a depth pass has
+    /// no material, so every caster sharing geometry collapses into one call
+    /// regardless of how it looks.
+    pub fn drawMeshInstanced(
+        self: *ShadowRenderer,
+        mesh: Mesh,
+        models: []const Matrix,
+        view_proj: Matrix,
+        depth_bias: f32,
+        slope_bias: f32,
+        sig: PassSignature,
+    ) void {
+        if (models.len == 0) return;
+
+        var key = PipelineKey{
+            .shader = self.inst_shader,
+            .layout = .mesh_instanced,
+            .index_type = mesh.index_type,
+            .indexed = true,
+            .pass = sig,
+            .primitive = .TRIANGLES,
+            .cull = .FRONT,
+            .blend = .none,
+            .depth_test = true,
+            .depth_write = true,
+        };
+        key.setDepthBias(depth_bias, slope_bias, 0.0);
+
+        const pip = self.cache.get(key) catch return;
+
+        // appendBuffer sub-allocates within the frame's single stream buffer and
+        // hands back the byte offset this batch landed at. Many appends per
+        // frame are fine; many updateBuffer calls would not be.
+        const offset = sg.appendBuffer(self.inst_buf, sg.asRange(models));
+        if (sg.queryBufferOverflow(self.inst_buf)) {
+            // Overflow drops the append silently, and the draw would then read
+            // stale matrices -- geometry appearing at last frame's positions in
+            // the shadow map, which is hard to recognise for what it is.
+            std.log.err(
+                "ShadowRenderer: instance buffer overflow ({d} bytes capacity) — raise max_instance_bytes",
+                .{max_instance_bytes},
+            );
+            return;
+        }
+
+        var vs = shd_depth_inst.VsParams{ .view_proj = matToArr(view_proj) };
+
+        var bindings = sg.Bindings{};
+        bindings.vertex_buffers[0] = mesh.vbuf;
+        bindings.vertex_buffers[1] = self.inst_buf;
+        bindings.vertex_buffer_offsets[1] = offset;
+        bindings.index_buffer = mesh.ibuf;
+
+        sg.applyPipeline(pip);
+        sg.applyBindings(bindings);
+        sg.applyUniforms(shd_depth_inst.UB_vs_params, sg.asRange(&vs));
+        sg.draw(0, mesh.index_count, @intCast(models.len));
     }
 
     pub fn drawModel(self: *ShadowRenderer, inst: ModelInstance, view_proj: Matrix, depth_bias: f32, slope_bias: f32, sig: PassSignature) void {

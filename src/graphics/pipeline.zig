@@ -17,6 +17,7 @@ pub const VertexLayout = enum {
     mesh_unlit, // Vertex3D buffer with only pos, normal and uv for unlit scenes.
     debug, // VertexDebug
     fullscreen, // Vertex2D buffer, only pos+uv consumed (screen-space passes)
+    mesh_instanced,
 
     /// Build the sokol vertex-layout state for this layout. Offsets and stride
     /// are set explicitly so behavior never depends on sokol's auto-layout.
@@ -52,6 +53,25 @@ pub const VertexLayout = enum {
                 l.buffers[0].stride = @sizeOf(Vertex2D);
                 l.attrs[0] = .{ .offset = @offsetOf(Vertex2D, "pos"), .format = .FLOAT2 };
                 l.attrs[1] = .{ .offset = @offsetOf(Vertex2D, "uv"), .format = .FLOAT2 };
+            },
+            .mesh_instanced => {
+                // Buffer 0: the ordinary per-vertex stream, identical to .mesh.
+                l.buffers[0].stride = @sizeOf(Vertex3D);
+                l.attrs[0] = .{ .offset = @offsetOf(Vertex3D, "pos"), .format = .FLOAT3 };
+                l.attrs[1] = .{ .offset = @offsetOf(Vertex3D, "normal"), .format = .FLOAT3 };
+                l.attrs[2] = .{ .offset = @offsetOf(Vertex3D, "uv"), .format = .FLOAT2 };
+                l.attrs[3] = .{ .offset = @offsetOf(Vertex3D, "tangent"), .format = .FLOAT4 };
+                l.attrs[4] = .{ .offset = @offsetOf(Vertex3D, "uv1"), .format = .FLOAT2 };
+
+                // Buffer 1: one model matrix per instance, as four FLOAT4 rows.
+                // PER_INSTANCE: Advances this buffer once per instance instead of once per vertex, so the same
+                // index range is redrawn with a different transform each time.
+                l.buffers[1].stride = 16 * @sizeOf(f32);
+                l.buffers[1].step_func = .PER_INSTANCE;
+                l.attrs[5] = .{ .buffer_index = 1, .offset = 0, .format = .FLOAT4 };
+                l.attrs[6] = .{ .buffer_index = 1, .offset = 16, .format = .FLOAT4 };
+                l.attrs[7] = .{ .buffer_index = 1, .offset = 32, .format = .FLOAT4 };
+                l.attrs[8] = .{ .buffer_index = 1, .offset = 48, .format = .FLOAT4 };
             },
         }
         return l;

@@ -347,10 +347,14 @@ pub fn render() void {
         // shadow_draws is the depth draws that survived per-view culling; the
         // uncalled number is queue length times caster count, so the two
         // together show exactly what the frustum test is rejecting.
+        // Three numbers, and the gaps between them are the story: draws is what
+        // the GPU is actually told to do, instances is what survived culling,
+        // and uncalled is what a naive loop would have submitted.
         const uncalled = scene.shadow_queue.items.len * scene.shadows.casters.items.len;
-        fps_text = std.fmt.bufPrint(&fps_buf, "{d:.0} FPS  {d:.2} ms  lights: {d}  casters: {d}  shadow draws: {d}/{d}  6/7=+/-16 8=pause 9=point shadow", .{
-            fps,                1000.0 / fps, env.lightCount(), scene.shadows.casters.items.len,
-            scene.shadow_draws, uncalled,
+        fps_text = std.fmt.bufPrint(&fps_buf, "{d:.0} FPS {d:.2} ms  lights: {d}  visible: {d}/{d}  casters: {d}  shadow: {d} ({d}/{d})", .{
+            fps,                 1000.0 / fps,           env.lightCount(),
+            scene.visible_draws, scene.submitted_draws,  scene.shadows.casters.items.len,
+            scene.shadow_draws,  scene.shadow_instances, uncalled,
         }) catch "FPS ?";
         fps_accum = 0;
         fps_frames = 0;
