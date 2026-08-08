@@ -27,7 +27,8 @@ const std = @import("std");
 const sg = @import("sokol").gfx;
 const zupra = @import("../root.zig");
 const math = @import("../math.zig");
-const zm = math.zm;
+// zmath no longer needed here: the view-space formulation uses only scalars
+// pulled out of the camera matrices, no inverse or full matrix multiply.
 const pipeline = @import("../graphics/pipeline.zig");
 const FullscreenTriangle = @import("fullscreen.zig").FullscreenTriangle;
 const Framebuffer = @import("framebuffer.zig").Framebuffer;
@@ -43,15 +44,15 @@ const PassSignature = pipeline.PassSignature;
 const Matrix = math.Matrix;
 
 const SsaoParams = extern struct {
-    inv_view_proj: [16]f32,
-    view_proj: [16]f32,
-    camera_pos: [4]f32,
-    params: [4]f32, // radius, intensity, bias, origin_top_left
-    tuning: [4]f32, // sample count, falloff power, 1/w, 1/h
+    view: [16]f32,
+    proj_xy: [4]f32, // m00, m11, 1/m00, 1/m11
+    depth_lin: [4]f32, // A, B, origin_top_left, sample count
+    params: [4]f32, // radius, intensity, bias, falloff
 };
 
 const BlurParams = extern struct {
-    params: [4]f32, // 1/w, 1/h, depth sharpness, kernel radius
+    params: [4]f32, // step.x, step.y, radius, relative tolerance
+    depth_lin: [4]f32, // A, B, unused, unused
 };
 
 pub const Settings = struct {
@@ -72,16 +73,17 @@ pub const Settings = struct {
     /// Exponent on the final term. Above 1 deepens contact shadows while
     /// leaving open areas alone; 1.0 is linear.
     falloff: f32 = 1.5,
-    /// Blur kernel radius in texels (max 4). Larger smooths more noise and
-    /// costs quadratically.
-    blur_radius: u32 = 2,
-    /// How sharply the blur rejects taps at differing depth. Higher confines
-    /// the filter more tightly to one surface, at the cost of leaving more
-    /// noise near edges.
-    blur_sharpness: f32 = 400.0,
-    /// Render AO at half resolution. AO is low-frequency, so the quality cost
-    /// is small and the saving is roughly four times the pass.
-    half_resolution: bool = true,
+    /// Blur kernel radius in taps per axis (max 8). The blur is separable, so
+    /// cost is linear in this, not quadratic.
+    blur_radius: u32 = 3,
+    /// How far a neighbour's depth may differ before the blur rejects it, as a
+    /// FRACTION of the centre pixel's view depth. Relative rather than absolute
+    /// so the same value behaves the same at one metre and at fifty.
+    blur_tolerance: f32 = 0.02,
+    /// Render AO at half resolution. The view-space formulation is cheap enough
+    /// to run at full resolution on a desktop GPU; half is the setting for
+    /// weaker hardware, and it costs edge definition on small features.
+    half_resolution: bool = false,
 };
 
 pub const Ssao = struct {
@@ -89,6 +91,19 @@ pub const Ssao = struct {
     shader: sg.Shader,
     blur_shader: sg.Shader,
     tri: FullscreenTriangle,
+    /// POINT sampling for everything these passes read.
+    ///
+    /// Depth and normals must never be interpolated. Across a silhouette,
+    /// linear filtering blends the near surface's depth with the far one's and
+    /// returns a value belonging to neither -- a phantom surface hanging in the
+    /// gap. The occlusion pass reconstructs a position there, its hemisphere
+    /// straddles both real surfaces, and the result is a one-pixel dark line
+    /// tracing every edge that swims as geometry moves across the pixel grid.
+    /// DeferredRenderer samples the G-buffer with NEAREST for the same reason.
+    point_sampler: sg.Sampler,
+    /// Linear, for whoever upsamples the finished buffer. Only matters when
+    /// half_resolution is on; at full resolution the consumer should point
+    /// sample this too.
     sampler: sg.Sampler,
 
     /// Ping and pong: occlusion is written to `ao`, blurred into `blurred`.
@@ -106,8 +121,12 @@ pub const Ssao = struct {
             .shader = sg.makeShader(shd.ssaoShaderDesc(sg.queryBackend())),
             .blur_shader = sg.makeShader(shd_blur.ssaoBlurShaderDesc(sg.queryBackend())),
             .tri = FullscreenTriangle.init(),
-            // CLAMP, and LINEAR so a half-resolution buffer upsamples smoothly
-            // when the lighting pass reads it at full resolution.
+            .point_sampler = sg.makeSampler(.{
+                .min_filter = .NEAREST,
+                .mag_filter = .NEAREST,
+                .wrap_u = .CLAMP_TO_EDGE,
+                .wrap_v = .CLAMP_TO_EDGE,
+            }),
             .sampler = sg.makeSampler(.{
                 .min_filter = .LINEAR,
                 .mag_filter = .LINEAR,
@@ -131,6 +150,7 @@ pub const Ssao = struct {
         self.ao.deinit();
         self.tri.deinit();
         sg.destroySampler(self.sampler);
+        sg.destroySampler(self.point_sampler);
         sg.destroyShader(self.blur_shader);
         sg.destroyShader(self.shader);
     }
@@ -154,35 +174,47 @@ pub const Ssao = struct {
         self.height = dims.h;
     }
 
-    /// Run both passes. Call after the G-buffer pass and BEFORE deferred
-    /// lighting, which samples the result.
+    /// Run all three passes (occlusion, then blur across each axis). Call after
+    /// the G-buffer pass and BEFORE deferred lighting, which samples the result.
     pub fn render(self: *Ssao, camera: Camera3D, depth_view: sg.View, normal_view: sg.View) void {
-        const vp = camera.viewProjection();
         const inv_w = 1.0 / @as(f32, @floatFromInt(self.width));
         const inv_h = 1.0 / @as(f32, @floatFromInt(self.height));
+
+        // Depth linearization constants. zmath's perspectiveFovLh puts
+        // A = f/(f-n) and B = -n*f/(f-n) in the matrix, giving
+        // depth = A + B/z and therefore z = B/(depth - A).
+        const n = camera.near;
+        const f = camera.far;
+        const a = f / (f - n);
+        const b = -n * f / (f - n);
+        const depth_lin = [4]f32{ a, b, 0, 0 };
+
+        // The projection's x and y scales are all the inner loop needs to move
+        // between view space and the screen -- no matrix required.
+        const proj = camera.projection();
+        const m00 = proj[0][0];
+        const m11 = proj[1][1];
 
         // Pass 1: occlusion.
         zupra.beginDrawingFramebuffer(self.ao);
         {
             var params = SsaoParams{
-                .inv_view_proj = @bitCast(zm.inverse(vp)),
-                .view_proj = @bitCast(vp),
-                .camera_pos = .{ camera.position.x, camera.position.y, camera.position.z, 0 },
+                .view = @bitCast(camera.view()),
+                .proj_xy = .{ m00, m11, 1.0 / m00, 1.0 / m11 },
+                .depth_lin = .{
+                    a,
+                    b,
+                    // Same flag the shadow sampler uses: where render targets
+                    // read top-left first, screen UVs and NDC y run opposite
+                    // ways, and this pass converts between them per sample.
+                    if (sg.queryFeatures().origin_top_left) 1.0 else 0.0,
+                    @floatFromInt(@max(1, self.settings.samples)),
+                },
                 .params = .{
                     self.settings.radius,
                     self.settings.intensity,
                     self.settings.bias,
-                    // Same flag the shadow sampler uses: on backends whose
-                    // render targets read top-left first, screen UVs and NDC y
-                    // run opposite ways, and this pass converts between them
-                    // twice per sample.
-                    if (sg.queryFeatures().origin_top_left) 1.0 else 0.0,
-                },
-                .tuning = .{
-                    @floatFromInt(@min(self.settings.samples, 32)),
                     self.settings.falloff,
-                    inv_w,
-                    inv_h,
                 },
             };
 
@@ -195,7 +227,7 @@ pub const Ssao = struct {
             bindings.vertex_buffers[0] = self.tri.vbuf;
             bindings.views[shd.VIEW_tex_depth] = depth_view;
             bindings.views[shd.VIEW_tex_normal] = normal_view;
-            bindings.samplers[shd.SMP_smp] = self.sampler;
+            bindings.samplers[shd.SMP_smp] = self.point_sampler;
 
             sg.applyPipeline(pip);
             sg.applyBindings(bindings);
@@ -204,33 +236,43 @@ pub const Ssao = struct {
         }
         zupra.endDrawing();
 
-        // Pass 2: depth-aware blur.
-        zupra.beginDrawingFramebuffer(self.blurred);
-        {
-            var params = BlurParams{ .params = .{
-                inv_w,
-                inv_h,
-                self.settings.blur_sharpness,
-                @floatFromInt(@min(self.settings.blur_radius, 4)),
-            } };
+        // Passes 2 and 3: separable blur. Horizontal ao -> blurred, then
+        // vertical blurred -> ao, so the finished result lands back in `ao` and
+        // no third target is needed.
+        const r: f32 = @floatFromInt(@min(self.settings.blur_radius, 8));
+        self.blurPass(self.ao, self.blurred, depth_view, .{ inv_w, 0 }, r, depth_lin);
+        self.blurPass(self.blurred, self.ao, depth_view, .{ 0, inv_h }, r, depth_lin);
+    }
 
-            const pip = self.pipelineFor(self.blur_shader, self.blurred.passSignature()) orelse {
-                zupra.endDrawing();
-                return;
-            };
+    fn blurPass(
+        self: *Ssao,
+        src: Framebuffer,
+        dst: Framebuffer,
+        depth_view: sg.View,
+        step: [2]f32,
+        radius: f32,
+        depth_lin: [4]f32,
+    ) void {
+        zupra.beginDrawingFramebuffer(dst);
+        defer zupra.endDrawing();
 
-            var bindings = sg.Bindings{};
-            bindings.vertex_buffers[0] = self.tri.vbuf;
-            bindings.views[shd_blur.VIEW_tex_ao] = self.ao.sample_view;
-            bindings.views[shd_blur.VIEW_tex_depth] = depth_view;
-            bindings.samplers[shd_blur.SMP_smp] = self.sampler;
+        const pip = self.pipelineFor(self.blur_shader, dst.passSignature()) orelse return;
 
-            sg.applyPipeline(pip);
-            sg.applyBindings(bindings);
-            sg.applyUniforms(shd_blur.UB_blur_params, sg.asRange(&params));
-            sg.draw(0, 3, 1);
-        }
-        zupra.endDrawing();
+        var params = BlurParams{
+            .params = .{ step[0], step[1], radius, self.settings.blur_tolerance },
+            .depth_lin = depth_lin,
+        };
+
+        var bindings = sg.Bindings{};
+        bindings.vertex_buffers[0] = self.tri.vbuf;
+        bindings.views[shd_blur.VIEW_tex_ao] = src.sample_view;
+        bindings.views[shd_blur.VIEW_tex_depth] = depth_view;
+        bindings.samplers[shd_blur.SMP_smp] = self.point_sampler;
+
+        sg.applyPipeline(pip);
+        sg.applyBindings(bindings);
+        sg.applyUniforms(shd_blur.UB_blur_params, sg.asRange(&params));
+        sg.draw(0, 3, 1);
     }
 
     /// The finished occlusion buffer, for the lighting pass to multiply in.
@@ -240,7 +282,7 @@ pub const Ssao = struct {
     /// out. Binding the attachment into a sampler slot is what sokol reports as
     /// VALIDATE_ABND_EXPECT_TEXVIEW.
     pub fn aoView(self: Ssao) sg.View {
-        return self.blurred.sample_view;
+        return self.ao.sample_view;
     }
 
     /// The AO buffer as a Texture, for drawing it to the screen through the
@@ -249,10 +291,12 @@ pub const Ssao = struct {
     /// correct-but-subtle one produce very different images, and only one of
     /// them is a bug.
     pub fn debugTexture(self: Ssao) tex.Texture {
-        return self.blurred.asTexture();
+        return self.ao.asTexture();
     }
+    /// Sampler for the lighting pass. Linear only helps when the buffer is at
+    /// half resolution and needs upsampling; at full resolution either is fine.
     pub fn aoSampler(self: Ssao) sg.Sampler {
-        return self.sampler;
+        return if (self.settings.half_resolution) self.sampler else self.point_sampler;
     }
 
     fn pipelineFor(self: *Ssao, shader: sg.Shader, sig: PassSignature) ?sg.Pipeline {
