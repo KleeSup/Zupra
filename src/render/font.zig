@@ -192,7 +192,12 @@ pub const Font = struct {
 
         if (self.pen_x + w > self.atlas_w) {
             self.pen_x = 0;
-            self.pen_y += self.row_h + 1;
+            // 2px between shelves, not 1. A linear sample reaches half a texel
+            // past the glyph rect, so a single-pixel gap leaves exactly zero
+            // headroom -- and under minification, which is the normal case for
+            // UI text baked large and drawn small, it reaches further still.
+            // The cost is a marginally less dense atlas.
+            self.pen_y += self.row_h + 2;
             self.row_h = 0;
         }
         if (self.pen_y + h > self.atlas_h) {
@@ -227,17 +232,26 @@ pub const Font = struct {
             .x_advance = advance,
         };
 
-        self.pen_x += w + 1;
+        self.pen_x += w + 2; // see the shelf advance above
         if (h > self.row_h) self.row_h = h;
         return g.value_ptr;
     }
 
     fn uploadIfNeeded(self: *Font) void {
         if (!self.dirty) return;
-        const frame = app.frameCount();
-        if (frame == self.last_upload_frame) return;
+
+        // No frame guard. It used to return early when an upload had already
+        // happened this frame -- but it left `dirty` set, so a second draw()
+        // in the same frame that baked a new glyph rendered from a stale atlas
+        // until the next frame, showing that glyph as garbage for one frame.
+        //
+        // Uploading is the right answer whenever `dirty` is set, because that
+        // flag means the CPU mirror holds pixels the GPU does not. Redundant
+        // uploads are still prevented: a draw that bakes nothing leaves `dirty`
+        // false and returns above, which is the overwhelmingly common case once
+        // the ASCII prebake has run.
         self.texture.update(self.pixels);
-        self.last_upload_frame = frame;
+        self.last_upload_frame = app.frameCount();
         self.dirty = false;
     }
 
@@ -258,6 +272,19 @@ pub const Font = struct {
 
             if (glyph.source.width > 0) {
                 var sprite = Sprite.init(.{ .texture = self.texture, .source = glyph.source });
+                // NOT pixel-snapped, deliberately. Rounding the quad position
+                // is the standard cure for glyph edges sampling their atlas
+                // neighbours, but it only holds when one unit of the 2D camera's
+                // space is one device pixel. This camera is authored at a fixed
+                // virtual size and stretched to the window, so rounding here
+                // quantises in the wrong space -- and since the quad's width
+                // stays fractional anyway, the texel alignment it was meant to
+                // buy never materialises. What it does produce is sub-pixel
+                // jitter in each glyph's offset, which shows up as visibly
+                // uneven spacing and baseline scatter.
+                //
+                // Bleeding is addressed at the source instead, by the 2px gap
+                // between glyphs in the atlas (see getOrBake).
                 sprite.dest = .{
                     .x = cursor_x + glyph.x_offset * scale,
                     .y = cursor_y + (self.ascent + glyph.y_offset) * scale,

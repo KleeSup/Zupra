@@ -85,6 +85,15 @@ pub fn beginDrawingFramebufferLoadDepth(fb: Framebuffer, clear_color: Color, dep
     beginFramebufferPass(fb, fb.passWith(.{ .action = action, .depth_view = depth_view }));
 }
 
+/// Begin a framebuffer pass that preserves existing color. This is needed for additive passes since
+/// clearing would discard the contribution they are adding to.
+pub fn beginDrawingFramebufferLoad(fb: Framebuffer) void {
+    var action = sokol.gfx.PassAction{};
+    action.colors[0] = .{ .load_action = .LOAD };
+    action.depth = .{ .load_action = .DONTCARE };
+    beginFramebufferPass(fb, fb.passWith(.{ .action = action }));
+}
+
 /// Begin a pass that renders INTO a framebuffer instead of the swapchain.
 /// Clears it to `clear_color` first.
 pub fn beginDrawingFramebufferClear(fb: Framebuffer, clear_color: Color) void {

@@ -15,6 +15,11 @@ pub const sky_cube = @import("sky_cube.glsl.zig");
 pub const ssao = @import("ssao.glsl.zig");
 pub const ssao_blur = @import("ssao_blur.glsl.zig");
 
+pub const bloom_composite = @import("bloom_composite.glsl.zig");
+pub const bloom_downsample = @import("bloom_downsample.glsl.zig");
+pub const bloom_prefilter = @import("bloom_prefilter.glsl.zig");
+pub const bloom_upsample = @import("bloom_upsample.glsl.zig");
+
 pub const lambert = @import("lambert.glsl.zig");
 pub const unlit = @import("unlit.glsl.zig");
 

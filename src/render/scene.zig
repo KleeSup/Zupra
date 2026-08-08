@@ -56,6 +56,7 @@ const PostChain = @import("posprocess.zig").PostChain;
 const AAMethod = @import("posprocess.zig").AAMethod;
 const EnvironmentMap = @import("render.zig").EnvironmentMap;
 const Ssao = @import("render.zig").Ssao;
+const Bloom = @import("render.zig").Bloom;
 
 const ShadowRenderer = @import("shadow_renderer.zig").ShadowRenderer;
 const ShadowParams = @import("shaders").mesh.ShadowParams;
@@ -166,6 +167,11 @@ pub const SceneRenderer = struct {
     /// which the forward path does not produce.
     ssao_enabled: bool = true,
 
+    bloom: Bloom = undefined,
+    /// HDR bloom. Costs roughly a dozen small fullscreen passes, although the widest
+    /// levels run on tiny images, so the total is far less than it looks.
+    bloom_enabled: bool = true,
+
     /// Submeshes submitted vs. those that survived camera culling last frame.
     submitted_draws: u32 = 0,
     visible_draws: u32 = 0,
@@ -229,6 +235,7 @@ pub const SceneRenderer = struct {
         }
         self.skybox = Skybox.init(cache);
         self.ibl = Ibl.init(allocator, cache);
+        self.bloom = Bloom.init(cache, width, height, .{});
         return self;
     }
 
@@ -253,6 +260,7 @@ pub const SceneRenderer = struct {
         if (self.ibl) |*ibl| ibl.deinit();
         self.shadows.deinit();
         self.shadow_queue.deinit(self.allocator);
+        self.bloom.deinit();
     }
 
     pub fn setRenderScale(self: *SceneRenderer, scale: u8) void {
@@ -309,6 +317,7 @@ pub const SceneRenderer = struct {
         }
         self.post.resize(rw, rh);
         self.ssao.resize(rw, rh);
+        self.bloom.resize(rw, rh);
         self.width = rw;
         self.height = rh;
     }
@@ -376,13 +385,15 @@ pub const SceneRenderer = struct {
         // camera culling. The shadow queue is deliberately NOT camera-culled:
         // an object behind the camera can still cast a shadow into view, so it
         // is tested against each LIGHT's frustum instead, never this one.
-        for (inst.model.meshes) |submesh| {
-            self.shadow_queue.append(self.allocator, .{
-                .mesh = submesh,
-                .model = model_matrix,
-                .bounds = submesh.bounds.transform(model_matrix),
-                .key = submesh.vbuf.id,
-            }) catch {};
+        if (inst.cast_shadows) {
+            for (inst.model.meshes) |submesh| {
+                self.shadow_queue.append(self.allocator, .{
+                    .mesh = submesh,
+                    .model = model_matrix,
+                    .bounds = submesh.bounds.transform(model_matrix),
+                    .key = submesh.vbuf.id,
+                }) catch {};
+            }
         }
 
         const dx = self.camera.position.x - inst.position.x;
@@ -440,6 +451,7 @@ pub const SceneRenderer = struct {
         frustum: Frustum,
         bias: f32,
         slope: f32,
+        cull: sg.CullMode,
         sig: PassSignature,
     ) void {
         const items = self.shadow_queue.items;
@@ -454,7 +466,6 @@ pub const SceneRenderer = struct {
                 if (!frustum.intersectsSphere(items[j].bounds)) continue;
                 self.instance_scratch.append(self.allocator, items[j].model) catch {};
             }
-
             if (self.instance_scratch.items.len > 0) {
                 self.shadow_draws += 1;
                 self.shadow_instances += @intCast(self.instance_scratch.items.len);
@@ -464,6 +475,7 @@ pub const SceneRenderer = struct {
                     view_proj,
                     bias,
                     slope,
+                    cull,
                     sig,
                 );
             }
@@ -620,7 +632,9 @@ pub const SceneRenderer = struct {
             .deferred => self.gbuffer.depthTexture(),
             .forward => null, // forward depth isn't sampleable yet
         };
-        self.post.present(self.scene_color.asTexture(), depth);
+        var hdr = self.scene_color.asTexture();
+        if (self.bloom_enabled) hdr = self.bloom.render(hdr);
+        self.post.present(hdr, depth);
     }
 
     fn composite(self: *SceneRenderer) void {
