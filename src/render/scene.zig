@@ -54,7 +54,7 @@ const AAMethod = @import("posprocess.zig").AAMethod;
 
 const ShadowRenderer = @import("shadow_renderer.zig").ShadowRenderer;
 const ShadowParams = @import("shaders").mesh.ShadowParams;
-const shadow_max_cascades = @import("shadow_renderer.zig").max_cascades;
+const shadow_max_views = @import("shadow_renderer.zig").max_shadow_views;
 
 pub const ShadingMode = enum { forward, deferred };
 
@@ -465,21 +465,22 @@ pub const SceneRenderer = struct {
 fn packShadowParams(rend: *const ShadowRenderer) ShadowParams {
     var p: ShadowParams = std.mem.zeroes(ShadowParams);
     const data = rend.shadowData();
-    const MC = shadow_max_cascades;
+    const MV = shadow_max_views;
     for (data, 0..) |d, li| {
         var c: usize = 0;
-        while (c < MC) : (c += 1) {
-            const o = (li * MC + c) * 4;
+        while (c < MV) : (c += 1) {
+            const o = (li * MV + c) * 4;
             const m = d.view_proj[c]; // [16]f32, row order
             p.sh_vp[o + 0] = .{ m[0], m[1], m[2], m[3] };
             p.sh_vp[o + 1] = .{ m[4], m[5], m[6], m[7] };
             p.sh_vp[o + 2] = .{ m[8], m[9], m[10], m[11] };
             p.sh_vp[o + 3] = .{ m[12], m[13], m[14], m[15] };
-            p.sh_rect[li * MC + c] = d.rect[c];
+            p.sh_rect[li * MV + c] = d.rect[c];
         }
         p.sh_info[li] = d.params;
         p.sh_split[li] = d.splits;
         p.sh_bias[li] = d.normal_bias;
+        p.sh_pos[li] = d.pos_kind;
     }
     return p;
 }

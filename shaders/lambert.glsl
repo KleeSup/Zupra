@@ -58,6 +58,7 @@ void main() {
 #define MAX_DIRECTIONAL 4
 #define ZUPRA_SHADOWS
 #define MAX_CASCADES 4
+#define MAX_SHADOW_VIEWS 6
 #define MAX_SHADOWED 16
 
 layout(binding=0) uniform texture2D normal_map;
@@ -108,11 +109,12 @@ layout(binding=6) uniform texture2D shadow_atlas;
 layout(binding=2) uniform samplerShadow smp_shadow;
 
 layout(binding=4) uniform shadow_params {
-    vec4 sh_vp[MAX_SHADOWED * MAX_CASCADES];
-    vec4 sh_rect[MAX_SHADOWED * MAX_CASCADES];
+    vec4 sh_vp[MAX_SHADOWED * MAX_SHADOW_VIEWS];
+    vec4 sh_rect[MAX_SHADOWED * MAX_SHADOW_VIEWS];
     vec4 sh_info[MAX_SHADOWED];
     vec4 sh_split[MAX_SHADOWED];
     vec4 sh_bias[MAX_SHADOWED];
+    vec4 sh_pos[MAX_SHADOWED];                 // xyz light pos, w = 1 if cube
 };
 
 @include_block pbr_brdf

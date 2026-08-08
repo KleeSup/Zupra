@@ -1,12 +1,22 @@
 //! examples/playground.zig
 //!
-//! CLUSTERED LIGHTING demo. A grid of PBR spheres under a dim sun plus MANY
-//! moving point lights - the thing a 16-light uniform array could never do.
-//! Lights orbit and bob so you can watch clustering track them live.
+//! CLUSTERED LIGHTING + SHADOWS demo. A mixed grid of PBR spheres and slowly
+//! spinning cubes under all three shadow-casting light types at once:
+//!
+//!   * a cascaded directional sun,
+//!   * a sweeping spot light with its own perspective shadow map,
+//!   * a point light in the middle of the grid casting in all six directions,
+//!
+//! plus as many unshadowed moving point lights as you care to add, to keep the
+//! froxel grid honest.
+//!
+//! Watching all three together is the point: each light's shadow only removes
+//! that light's contribution, so where the sun's shadow and the spot's shadow
+//! cross you get a third, darker region rather than either cancelling out.
 //!
 //! Keys:
 //!   6   add 16 point lights      7   remove 16
-//!   8   toggle light motion
+//!   8   toggle light motion      9   toggle the shadowed point light
 //!   1..5  AA (raw / FXAA / FXAA-quality / SSAA / both)   0  AA off
 
 const std = @import("std");
@@ -35,8 +45,26 @@ var ui_cam: Camera2D = undefined;
 var text: zupra.render.TextBatch2D = undefined;
 
 var floor_model: Model = undefined;
-var sphere_metal: Model = undefined;
-var sphere_rough: Model = undefined;
+
+/// One surface look. Six of them, each built once as a sphere and again as a
+/// cube, so the grid can mix shape and material independently.
+const Look = struct {
+    color: zupra.Color,
+    metallic: f32,
+    roughness: f32,
+};
+
+const palette = [_]Look{
+    .{ .color = .{ .r = 0.90, .g = 0.90, .b = 0.92, .a = 1 }, .metallic = 1.0, .roughness = 0.18 }, // polished steel
+    .{ .color = .{ .r = 0.85, .g = 0.30, .b = 0.32, .a = 1 }, .metallic = 0.0, .roughness = 0.55 }, // red plastic
+    .{ .color = .{ .r = 0.20, .g = 0.45, .b = 0.80, .a = 1 }, .metallic = 0.0, .roughness = 0.35 }, // blue enamel
+    .{ .color = .{ .r = 0.95, .g = 0.75, .b = 0.25, .a = 1 }, .metallic = 1.0, .roughness = 0.32 }, // gold
+    .{ .color = .{ .r = 0.25, .g = 0.65, .b = 0.40, .a = 1 }, .metallic = 0.0, .roughness = 0.75 }, // matte green
+    .{ .color = .{ .r = 0.55, .g = 0.35, .b = 0.75, .a = 1 }, .metallic = 0.3, .roughness = 0.28 }, // violet
+};
+
+var sphere_models: [palette.len]Model = undefined;
+var cube_models: [palette.len]Model = undefined;
 
 const grid_x = 8;
 const grid_z = 8;
@@ -55,11 +83,15 @@ var movers: std.ArrayList(PointMover) = .empty;
 var lights_move = true;
 var elapsed: f32 = 0;
 
+var spot_light: LightHandle = undefined;
+var point_light: LightHandle = undefined;
+var point_shadow_on = true;
+
 var rng = std.Random.DefaultPrng.init(0x9E3779B97F4A7C15);
 
 var fps_accum: f32 = 0;
 var fps_frames: u32 = 0;
-var fps_buf: [96]u8 = undefined;
+var fps_buf: [128]u8 = undefined;
 var fps_text: []const u8 = "";
 
 pub fn main(ctx: std.process.Init) !void {
@@ -109,7 +141,7 @@ fn removeMovers(n: usize) void {
 pub fn init() void {
     gpa = zupra.getGPA();
     cache = .init(gpa);
-    scene = zupra.render.SceneRenderer.init(gpa, &cache, .deferred, 1280, 720);
+    scene = zupra.render.SceneRenderer.init(gpa, &cache, .forward, 1280, 720);
     scene.setAAMethod(.fxaa);
 
     cam = zupra.render.Camera3D.init(16.0 / 9.0);
@@ -120,47 +152,63 @@ pub fn init() void {
     ui_cam = Camera2D.init(1280, 720);
     text = zupra.render.TextBatch2D.init(&font, &batch);
 
-    // Environment now owns GPU resources (clustered light store), so it takes an
-    // allocator and must be passed by pointer, never copied.
     env = Environment.init(gpa);
-    env.ambient = .{ .r = 0.02, .g = 0.02, .b = 0.03, .a = 1 };
+    env.ambient = .{ .r = 0.03, .g = 0.03, .b = 0.04, .a = 1 };
 
-    // Dim sun so the point lights dominate.
+    // ---------------------------------------------------------------------
+    //  Lights
+    //
+    //  ATLAS BUDGET. Every shadowed light competes for tiles in one 4096
+    //  atlas, and a point light is six of them. This set comes to 4x1024
+    //  (sun) + 1x1024 (spot) + 6x512 (point) = 11 tiles. Raising the sun to
+    //  2048 would alone consume most of the atlas and starve the other two --
+    //  which is exactly the trade a real scene has to make, so it's worth
+    //  seeing here rather than hiding behind a bigger atlas.
+    // ---------------------------------------------------------------------
+
     const sun = env.addLight(Light.directional(
         .{ .x = -0.5, .y = -1.0, .z = -0.35 },
         .{ .r = 1.0, .g = 0.96, .b = 0.9, .a = 1 },
         3.0,
     )) catch unreachable;
-
     if (env.getLight(sun)) |l| {
-        l.shadow = .{
-            .enabled = true,
-            //     .resolution = 2048,
-            //.cascade_count = 4,
-            .max_distance = 60,
-        };
+        l.shadow = .{ .enabled = true, .resolution = 1024, .cascade_count = 4, .max_distance = 60 };
     }
 
-    // Spot shadow test rig. Positioned high and off to one side so the cone
-    // hits the sphere grid at a shallow angle -- the case that exposes a bad
-    // near plane or bad bias fastest.
-    const spot = env.addLight(Light.spot(
-        .{ .x = -8, .y = 9, .z = -6 }, // position
-        .{ .x = 0.6, .y = -1.0, .z = 0.45 }, // cone axis (travel direction)
-        .{ .r = 1.0, .g = 0.95, .b = 0.8, .a = 1 },
-        120.0, // intensity: punctual falloff is inverse-square, so this
-        // needs to be far higher than a directional's to read
-        30.0, // range: also the clustering cull bound, keep it honest
-        18.0, // inner cone half-angle, full intensity within
-        26.0, // outer half-angle, faded to zero -- and the shadow frustum
+    // Sweeps a circle overhead each frame (see render). Aimed inward and down,
+    // so its cone crosses the sun's shadows at a steep angle and the two sets
+    // of shadows stay easy to tell apart.
+    spot_light = env.addLight(Light.spot(
+        .{ .x = -10, .y = 10, .z = -8 },
+        .{ .x = 0.7, .y = -1.0, .z = 0.55 },
+        .{ .r = 1.0, .g = 0.93, .b = 0.75, .a = 1 },
+        150.0, // inverse-square falloff, so far higher than the sun's 3.0
+        36.0, // range: also the shadow far plane and the clustering bound
+        16.0,
+        24.0, // outer angle IS the shadow frustum's half-angle
     )) catch unreachable;
-
-    if (env.getLight(spot)) |l| {
-        // cascade_count stays 1: a spot's cone already is the frustum, so there
-        // is nothing to split. max_distance is the cull range for the light
-        // itself here, not a cascade range.
-        l.shadow = .{ .enabled = true, .resolution = 1024, .cascade_count = 1, .max_distance = 80 };
+    if (env.getLight(spot_light)) |l| {
+        l.shadow = .{ .enabled = true, .resolution = 1024, .cascade_count = 1, .max_distance = 90 };
     }
+
+    // Sits low in the middle of the grid so its six faces all have something to
+    // cast: shadows radiate outward in every direction from one source.
+    point_light = env.addLight(Light.point(
+        .{ .x = 0, .y = 2.2, .z = 0 },
+        .{ .r = 0.55, .g = 0.85, .b = 1.0, .a = 1 },
+        60.0,
+        14.0,
+    )) catch unreachable;
+    if (env.getLight(point_light)) |l| {
+        // 512 per face, not 1024: six tiles at 1024 is a quarter of the atlas
+        // for one light. Faces are only ever seen from inside the light's
+        // range, so they need less resolution than they look like they should.
+        l.shadow = .{ .enabled = true, .resolution = 512, .cascade_count = 1, .max_distance = 60 };
+    }
+
+    // ---------------------------------------------------------------------
+    //  Geometry
+    // ---------------------------------------------------------------------
 
     floor_model = Model.fromMesh(gpa, MeshBuilder.plane(48, 48), .{
         .base_color = .{ .r = 0.5, .g = 0.5, .b = 0.55, .a = 1 },
@@ -168,20 +216,19 @@ pub fn init() void {
         .roughness = 0.9,
     }) catch unreachable;
 
-    sphere_metal = Model.fromMesh(gpa, MeshBuilder.sphere(gpa, 0.9, 32, 32) catch unreachable, .{
-        .base_color = .{ .r = 0.9, .g = 0.9, .b = 0.9, .a = 1 },
-        .metallic = 1.0,
-        .roughness = 0.25,
-    }) catch unreachable;
-    sphere_rough = Model.fromMesh(gpa, MeshBuilder.sphere(gpa, 0.9, 32, 32) catch unreachable, .{
-        .base_color = .{ .r = 0.8, .g = 0.3, .b = 0.3, .a = 1 },
-        .metallic = 0.0,
-        .roughness = 0.6,
-    }) catch unreachable;
-
-    // 48 lights to start - already 3x the old fixed cap.
-    var i: usize = 0;
-    while (i < 63) : (i += 1) addMover();
+    for (palette, 0..) |look, i| {
+        const mat = Material{
+            .base_color = look.color,
+            .metallic = look.metallic,
+            .roughness = look.roughness,
+        };
+        sphere_models[i] = Model.fromMesh(
+            gpa,
+            MeshBuilder.sphere(gpa, 0.9, 32, 32) catch unreachable,
+            mat,
+        ) catch unreachable;
+        cube_models[i] = Model.fromMesh(gpa, MeshBuilder.cube(1.5, 1.5, 1.5), mat) catch unreachable;
+    }
 }
 
 pub fn render() void {
@@ -194,6 +241,14 @@ pub fn render() void {
     }
     if (zupra.input.isKeyJustPressed(._7)) removeMovers(16);
     if (zupra.input.isKeyJustPressed(._8)) lights_move = !lights_move;
+
+    // Toggling this is the clearest way to see what six tiles actually buy:
+    // shadows radiating from the centre appear and vanish, and the caster count
+    // in the overlay jumps by six.
+    if (zupra.input.isKeyJustPressed(._9)) {
+        point_shadow_on = !point_shadow_on;
+        if (env.getLight(point_light)) |l| l.shadow.enabled = point_shadow_on;
+    }
 
     if (zupra.input.isKeyJustPressed(._1)) {
         scene.setAAMethod(.none);
@@ -215,8 +270,8 @@ pub fn render() void {
         scene.setRenderScale(1);
     }
 
-    // Orbit + bob each point light. Mutated via the stable handle.
     if (lights_move) {
+        // Orbit + bob each unshadowed point light, via its stable handle.
         for (movers.items) |m| {
             if (env.getLight(m.handle)) |l| {
                 const a = m.phase + elapsed * m.speed;
@@ -227,12 +282,24 @@ pub fn render() void {
                 };
             }
         }
+
+        // Walk the spot around the grid, always aimed at the centre. Moving the
+        // light rather than the geometry is the honest test of the shadow map:
+        // the whole frustum is refitted every frame, so any instability in the
+        // projection shows up as swimming shadows.
+        if (env.getLight(spot_light)) |l| {
+            const a = elapsed * 0.35;
+            const px = @cos(a) * 13.0;
+            const pz = @sin(a) * 13.0;
+            l.position = .{ .x = px, .y = 11.0, .z = pz };
+            l.direction = .{ .x = -px, .y = -11.0, .z = -pz };
+        }
     }
 
     controller.update(dt);
     controller.applyTo(&cam);
 
-    scene.begin(cam, &env); // pointer
+    scene.begin(cam, &env);
 
     var floor = floor_model.instance();
     floor.setPosition(.{ .x = 0, .y = 0, .z = 0 });
@@ -244,9 +311,28 @@ pub fn render() void {
         while (gx < grid_x) : (gx += 1) {
             const px = (@as(f32, @floatFromInt(gx)) - grid_x * 0.5 + 0.5) * grid_spacing;
             const pz = (@as(f32, @floatFromInt(gz)) - grid_z * 0.5 + 0.5) * grid_spacing;
-            var inst = if ((gx + gz) & 1 == 0) sphere_metal.instance() else sphere_rough.instance();
-            inst.setPosition(.{ .x = px, .y = 1.0, .z = pz });
-            scene.draw(inst);
+
+            // Coprime strides so shape and colour cycle at different rates and
+            // the grid doesn't fall into an obvious stripe.
+            const look = (gx * 5 + gz * 3) % palette.len;
+            const is_cube = (gx + gz * 3) % 3 == 0;
+
+            if (is_cube) {
+                var inst = cube_models[look].instance();
+                inst.setPosition(.{ .x = px, .y = 0.75, .z = pz });
+                // A turning box is the best shadow test in the scene: its
+                // silhouette changes every frame, so a stale or cached map
+                // would be obvious immediately.
+                inst.setRotationAxisAngle(
+                    .{ .x = 0, .y = 1, .z = 0 },
+                    elapsed * 0.5 + @as(f32, @floatFromInt(gx + gz)),
+                );
+                scene.draw(inst);
+            } else {
+                var inst = sphere_models[look].instance();
+                inst.setPosition(.{ .x = px, .y = 0.9, .z = pz });
+                scene.draw(inst);
+            }
         }
     }
     scene.end();
@@ -255,8 +341,11 @@ pub fn render() void {
     fps_frames += 1;
     if (fps_accum >= 0.25) {
         const fps = @as(f32, @floatFromInt(fps_frames)) / fps_accum;
-        fps_text = std.fmt.bufPrint(&fps_buf, "{d:.0} FPS  {d:.2} ms   lights: {d}   6/7=+/-16  8=pause", .{
-            fps, 1000.0 / fps, env.lightCount(),
+        // Caster count is the shadow system's real cost signal: one depth pass
+        // per caster per frame. Sun cascades + spot + point faces, so it should
+        // read 11 with everything on and 5 with the point light's shadow off.
+        fps_text = std.fmt.bufPrint(&fps_buf, "{d:.0} FPS  {d:.2} ms   lights: {d}   casters: {d}   6/7=+/-16  8=pause  9=point shadow", .{
+            fps, 1000.0 / fps, env.lightCount(), scene.shadows.casters.items.len,
         }) catch "FPS ?";
         fps_accum = 0;
         fps_frames = 0;
@@ -279,8 +368,8 @@ pub fn deinit() void {
     font.deinit();
     batch.deinit(gpa);
     floor_model.deinit();
-    sphere_metal.deinit();
-    sphere_rough.deinit();
+    for (&sphere_models) |*m| m.deinit();
+    for (&cube_models) |*m| m.deinit();
     env.deinit();
     scene.deinit();
     cache.deinit();

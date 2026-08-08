@@ -181,14 +181,15 @@ int punctualShadowIndex(int idx) {
 //  Shadows. shadowFactor() returns 1.0 (fully lit) .. 0.0 (fully shadowed).
 //  The including shader must, when it wants shadows, declare:
 //
-//    #define MAX_CASCADES 4
+//    #define MAX_SHADOW_VIEWS 6
 //    #define MAX_SHADOWED 16
 //    layout(binding=?) uniform shadow_params {
-//        vec4 sh_vp[MAX_SHADOWED * MAX_CASCADES];  // 4 vec4 per mat4, see index
-//        vec4 sh_rect[MAX_SHADOWED * MAX_CASCADES];// atlas rect per cascade
+//        vec4 sh_vp[MAX_SHADOWED * MAX_SHADOW_VIEWS];  // 4 vec4 per mat4
+//        vec4 sh_rect[MAX_SHADOWED * MAX_SHADOW_VIEWS];// atlas rect per view
 //        vec4 sh_info[MAX_SHADOWED];   // x cascades, y pcf radius, z blend, w texel
 //        vec4 sh_split[MAX_SHADOWED];  // cascade far splits (view depth)
 //        vec4 sh_bias[MAX_SHADOWED];   // normal-offset bias (world), per cascade
+//        vec4 sh_pos[MAX_SHADOWED];    // xyz light position, w = 1 if cube
 //    };
 //    uniform texture2D shadow_atlas;
 //    uniform samplerShadow smp_shadow;  // comparison sampler
@@ -201,7 +202,7 @@ mat4 shadowMatrix(int shadow_index, int cascade) {
     // sh_vp packs one mat4 as 4 consecutive vec4 ROWS (the CPU side is
     // row-major). mat4() consumes them as COLUMNS, so what comes back is the
     // transpose -- which is exactly what the M * v multiply downstream wants.
-    int o = (shadow_index * MAX_CASCADES + cascade) * 4;
+    int o = (shadow_index * MAX_SHADOW_VIEWS + cascade) * 4;
     return mat4(sh_vp[o + 0], sh_vp[o + 1], sh_vp[o + 2], sh_vp[o + 3]);
 }
 
@@ -257,25 +258,49 @@ float sampleShadow(int shadow_index, int cascade, vec3 world_pos, float ndotl) {
     // Light clip [-1,1] xy -> [0,1], then into the cascade's atlas rect.
     vec2 uv = proj.xy * 0.5 + 0.5;
     if (cluster_depth.z > 0.5) uv.y = 1.0 - uv.y; // match backend depth origin
-    vec4 rect = sh_rect[shadow_index * MAX_CASCADES + cascade];
-    vec2 atlas_uv = rect.xy + uv * rect.zw;
+    vec4 rect = sh_rect[shadow_index * MAX_SHADOW_VIEWS + cascade];
 
     float depth_ref = proj.z; // sokol [0,1] clip depth
 
-    // Outside the light frustum -> lit (no shadow data there).
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || depth_ref > 1.0) {
-        return 1.0;
+    // Past the far plane there is no data for any light type.
+    if (depth_ref > 1.0) return 1.0;
+
+    // Outside the frustum -> lit, but ONLY for light types that have an
+    // outside. A spot's cone and a cascade's box both end somewhere, and beyond
+    // that edge there is genuinely nothing recorded.
+    //
+    // A cube has no outside: its six faces tile the sphere completely, so every
+    // fragment belongs to exactly one of them. At a face boundary the
+    // projection lands exactly on 0 or 1 and rounding pushes it a hair past,
+    // and the normal-offset bias nudges the sample point across the seam as
+    // well -- so this test would report "lit" along every seam and draw bright
+    // lines where the faces meet. The tap clamping below keeps those samples
+    // inside their own tile, which is the correct answer there.
+    if (sh_pos[shadow_index].w < 0.5) {
+        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
     }
 
     // PCF: NxN comparison-sampled taps. The comparison sampler returns the
     // fraction of the 2x2 that passes per tap; averaging taps softens further.
+    //
+    // Taps are offset and CLAMPED in tile space, then mapped into the atlas.
+    // Offsetting in atlas space instead lets a tap at a tile border wander into
+    // the neighbouring tile, which is a different cascade, a different cube face
+    // or a different light entirely -- and reads as a hard wrong-shadow fringe
+    // along every tile edge. The half-texel inset accounts for the comparison
+    // sampler's own 2x2 footprint, which reaches half a texel past the tap.
     float texel = sh_info[shadow_index].w;
     int radius = int(sh_info[shadow_index].y);
+    vec2 tile_texel = vec2(texel) / max(rect.zw, vec2(1e-6));
+    vec2 lo = tile_texel * 0.5;
+    vec2 hi = vec2(1.0) - lo;
+
     float sum = 0.0;
     float count = 0.0;
     for (int y = -radius; y <= radius; y++) {
         for (int x = -radius; x <= radius; x++) {
-            vec2 t = atlas_uv + vec2(float(x), float(y)) * texel;
+            vec2 tuv = clamp(uv + vec2(float(x), float(y)) * tile_texel, lo, hi);
+            vec2 t = rect.xy + tuv * rect.zw;
             sum += textureLod(sampler2DShadow(shadow_atlas, smp_shadow), vec3(t, depth_ref), 0.0);
             count += 1.0;
         }
@@ -291,8 +316,33 @@ float shadowInCascade(int shadow_index, int cascade, vec3 world_pos, vec3 N) {
     return sampleShadow(shadow_index, cascade, biased, 1.0);
 }
 
+// Which cube face a direction falls on, in the order buildPoint fills them:
+// +X, -X, +Y, -Y, +Z, -Z. The dominant axis picks the face; its sign picks which
+// of the pair. Written as one assigned local rather than early returns, for the
+// same FXC reason as cascadeSplit above.
+int cubeFace(vec3 dir) {
+    vec3 a = abs(dir);
+    int face;
+    if (a.x >= a.y && a.x >= a.z) {
+        face = dir.x > 0.0 ? 0 : 1;
+    } else if (a.y >= a.z) {
+        face = dir.y > 0.0 ? 2 : 3;
+    } else {
+        face = dir.z > 0.0 ? 4 : 5;
+    }
+    return face;
+}
+
 float shadowFactor(int shadow_index, vec3 world_pos, vec3 N, float view_depth) {
     if (shadow_index < 0) return 1.0;
+
+    // Point light: pick the cube face the fragment lies on and sample it. No
+    // cascades and nothing to blend -- the six faces tile the sphere edge to
+    // edge rather than nesting, so a fragment belongs to exactly one.
+    if (sh_pos[shadow_index].w > 0.5) {
+        vec3 to_frag = world_pos - sh_pos[shadow_index].xyz;
+        return shadowInCascade(shadow_index, cubeFace(to_frag), world_pos, N);
+    }
 
     int cascades = int(sh_info[shadow_index].x);
     int cascade = pickCascade(shadow_index, view_depth);

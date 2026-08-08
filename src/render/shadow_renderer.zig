@@ -37,6 +37,16 @@ const PassSignature = pipeline.PassSignature;
 
 /// Max cascades per directional light. 4 is the industry norm.
 pub const max_cascades = 4;
+
+/// Shadow VIEWS per light -- the stride of the per-light matrix and rect
+/// arrays. Six, because a point light needs one map per cube face; a
+/// directional uses up to max_cascades of them and a spot exactly one.
+///
+/// Sized by the largest consumer rather than per type because the uniform block
+/// is a flat array with a fixed stride: sh_vp[light * MAX_SHADOW_VIEWS + view].
+/// A ragged layout would need an offset table and another indirection in the
+/// shader to save a few kilobytes of uniform space.
+pub const max_shadow_views = 6;
 /// Max simultaneously shadowed lights (any type). The shadow_data shader array
 /// is sized to this. Generous, but each entry is small.
 pub const max_shadowed = 16;
@@ -44,21 +54,31 @@ pub const max_shadowed = 16;
 /// One shadowed light's data, uploaded parallel to the light list. The shader
 /// indexes this by the light's shadow_index (stored in the light texture).
 pub const ShadowData = extern struct {
-    /// Light-space view-projection. For cascades, this is per-cascade (see
-    /// cascade_vp). For a single map, only [0] is used.
-    view_proj: [max_cascades][16]f32,
-    /// Atlas rect per cascade (xy origin, zw size, in [0,1] UV).
-    rect: [max_cascades][4]f32,
-    /// x = cascade count, y = pcf radius (texels), z = cascade blend fraction,
+    /// Light-space view-projection per VIEW: cascade 0..n for a directional,
+    /// [0] alone for a spot, cube face 0..5 for a point light.
+    view_proj: [max_shadow_views][16]f32,
+    /// Atlas rect per view (xy origin, zw size, in [0,1] UV).
+    rect: [max_shadow_views][4]f32,
+    /// x = VIEW count (cascades for directional, 1 for spot, 6 for point),
+    /// y = pcf radius (texels), z = cascade blend fraction,
     /// w = atlas texel size (1/atlas_size, for PCF tap spacing).
     params: [4]f32,
     /// Cascade split distances (view-space), x..w = splits 0..3 far planes.
     /// Used to pick the cascade for a fragment by its depth.
     splits: [4]f32,
     /// Normal-offset bias in WORLD units, one per cascade (x..w = cascades
-    /// 0..3). Resolved on the CPU because it depends on each cascade's fitted
+    /// 0..3). Resolved on the CPU because it depends on each view's fitted
     /// extent, which the shader has no way to recover from the matrix.
+    ///
+    /// Four components for up to six views: spot and point lights write the
+    /// same value to all four, since every face of a cube shares one fov and one
+    /// range, so whichever component the shader reads is the right one.
     normal_bias: [4]f32,
+    /// xyz = light world position, w = 1.0 for a cube (point) light, 0.0
+    /// otherwise. The shader needs the position to work out which cube face a
+    /// fragment falls on, and the flag to know to look at all -- a directional
+    /// has neither a position nor faces.
+    pos_kind: [4]f32,
 };
 
 pub const ShadowRenderer = struct {
@@ -126,8 +146,7 @@ pub const ShadowRenderer = struct {
             const assigned: bool = switch (l.type) {
                 .directional => self.buildDirectional(l.*, l.shadow, camera),
                 .spot => self.buildSpot(l.*, l.shadow, camera),
-                // .point => self.buildPoint(l.*, l.shadow, camera), // Phase 4
-                else => false,
+                .point => self.buildPoint(l.*, l.shadow, camera),
             };
             if (assigned) {
                 l.shadow_index = @intCast(self.data_count - 1);
@@ -151,6 +170,10 @@ pub const ShadowRenderer = struct {
         var splits: [max_cascades + 1]f32 = undefined;
         computeSplits(camera.near, s.max_distance, cascades, &splits);
         d.splits = .{ splits[1], splits[2], splits[3], splits[4] };
+
+        // No position and no cube faces: a directional light's rays are
+        // parallel, so there is nothing for the shader to select between.
+        d.pos_kind = .{ 0, 0, 0, 0 };
 
         const light_dir = l.direction.normalize();
 
@@ -244,7 +267,11 @@ pub const ShadowRenderer = struct {
         // shader, which in turn needs the light position in the shadow uniform.
         const ref_dist = far_z * 0.5;
         const texel_world = 2.0 * ref_dist * @tan(fov_y * 0.5) / @as(f32, @floatFromInt(tile.size));
-        d.normal_bias[0] = s.normal_bias_texels * texel_world;
+        d.normal_bias = @splat(s.normal_bias_texels * texel_world);
+
+        // Position is carried for completeness; kind stays 0 because a spot is
+        // a single map and needs no face selection.
+        d.pos_kind = .{ l.position.x, l.position.y, l.position.z, 0 };
 
         self.casters.append(self.allocator, .{
             .view_proj = view_proj,
@@ -255,6 +282,102 @@ pub const ShadowRenderer = struct {
             .depth_bias = s.depth_bias,
             .depth_bias_slope = s.slope_bias,
         }) catch {};
+
+        self.data[self.data_count] = d;
+        self.data_count += 1;
+        return true;
+    }
+
+    /// The six cube-face axes, in the order the shader's cubeFace() reports:
+    /// +X, -X, +Y, -Y, +Z, -Z.
+    ///
+    /// The up vectors only have to be non-degenerate against their axis. Real
+    /// cubemaps fix them to match a hardware sampling convention, but nothing
+    /// here samples a cubemap: each face is an ordinary 2D tile in the atlas and
+    /// the shader applies whatever matrix this produced. The choice cancels out,
+    /// as long as build and sample agree -- and they do, because sampling never
+    /// sees it.
+    const cube_faces = [6]struct { dir: Vec3, up: Vec3 }{
+        .{ .dir = .{ .x = 1, .y = 0, .z = 0 }, .up = .{ .x = 0, .y = 1, .z = 0 } },
+        .{ .dir = .{ .x = -1, .y = 0, .z = 0 }, .up = .{ .x = 0, .y = 1, .z = 0 } },
+        .{ .dir = .{ .x = 0, .y = 1, .z = 0 }, .up = .{ .x = 0, .y = 0, .z = -1 } },
+        .{ .dir = .{ .x = 0, .y = -1, .z = 0 }, .up = .{ .x = 0, .y = 0, .z = 1 } },
+        .{ .dir = .{ .x = 0, .y = 0, .z = 1 }, .up = .{ .x = 0, .y = 1, .z = 0 } },
+        .{ .dir = .{ .x = 0, .y = 0, .z = -1 }, .up = .{ .x = 0, .y = 1, .z = 0 } },
+    };
+
+    /// Point lights shadow in every direction, so they get six 90-degree
+    /// perspective views arranged as a cube around the light. Six tiles and six
+    /// depth passes make this by far the most expensive light to shadow -- the
+    /// same budget as six spots -- which is why engines shadow only a handful of
+    /// point lights and leave the rest unshadowed.
+    ///
+    /// The faces are stored as six independent atlas tiles rather than a real
+    /// cubemap. That keeps one atlas, one sampler and one code path for all
+    /// three light types, at the cost of filtering across face seams: hardware
+    /// cube sampling would interpolate between faces, whereas PCF taps here are
+    /// clamped inside their tile (see sampleShadow) and repeat the edge texel.
+    fn buildPoint(self: *ShadowRenderer, l: Light, s: ShadowSettings, camera: Camera3D) bool {
+        // Same reach test as a spot, and it matters six times as much here.
+        const to_light = l.position.sub(camera.position).length();
+        if (to_light - l.range > s.max_distance) return false;
+
+        const near_z = @max(0.05, l.range * 0.01);
+        const far_z = @max(near_z + 0.1, l.range);
+        // 90 degrees exactly: six of them tile a full sphere with no gap and no
+        // overlap, which is the whole reason a cube is used rather than some
+        // other arrangement of frusta.
+        const fov_y = std.math.degreesToRadians(90.0);
+        const light_proj = zm.perspectiveFovLh(fov_y, 1.0, near_z, far_z);
+
+        var d: ShadowData = std.mem.zeroes(ShadowData);
+        d.params = .{
+            6.0, // six views
+            @floatFromInt(s.pcf_radius),
+            0.0, // nothing to blend between; faces are adjacent, not nested
+            1.0 / @as(f32, @floatFromInt(self.atlas.size)),
+        };
+        d.splits = @splat(far_z);
+        d.pos_kind = .{ l.position.x, l.position.y, l.position.z, 1.0 };
+
+        // Every face shares the fov and range, so one bias serves all six.
+        var texel_world: f32 = 0;
+
+        var f: usize = 0;
+        while (f < cube_faces.len) : (f += 1) {
+            // Partial allocation would leave a light shadowing correctly in some
+            // directions and not others, which reads as geometry randomly not
+            // casting. Better to drop the light: bail and let it go unshadowed.
+            const tile = self.atlas.allocate(s.resolution) orelse return false;
+
+            const face = cube_faces[f];
+            const light_view = zm.lookAtLh(
+                v4(l.position, 1),
+                v4(l.position.add(face.dir), 1),
+                v4(face.up, 0),
+            );
+            const view_proj = zm.mul(light_view, light_proj);
+
+            d.view_proj[f] = matToArr(view_proj);
+            d.rect[f] = tile.rect.uv;
+
+            if (f == 0) {
+                const ref_dist = far_z * 0.5;
+                texel_world = 2.0 * ref_dist * @tan(fov_y * 0.5) / @as(f32, @floatFromInt(tile.size));
+            }
+
+            self.casters.append(self.allocator, .{
+                .view_proj = view_proj,
+                .rect = tile.rect,
+                .tile_x = tile.x,
+                .tile_y = tile.y,
+                .tile_size = tile.size,
+                .depth_bias = s.depth_bias,
+                .depth_bias_slope = s.slope_bias,
+            }) catch {};
+        }
+
+        d.normal_bias = @splat(s.normal_bias_texels * texel_world);
 
         self.data[self.data_count] = d;
         self.data_count += 1;
