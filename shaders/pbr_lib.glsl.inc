@@ -190,6 +190,7 @@ int punctualShadowIndex(int idx) {
 //        vec4 sh_split[MAX_SHADOWED];  // cascade far splits (view depth)
 //        vec4 sh_bias[MAX_SHADOWED];   // normal-offset bias (world), per cascade
 //        vec4 sh_pos[MAX_SHADOWED];    // xyz light position, w = 1 if cube
+//        vec4 sh_fade[MAX_SHADOWED];   // x fade start, y 1/span, zw reserved
 //    };
 //    uniform texture2D shadow_atlas;
 //    uniform samplerShadow smp_shadow;  // comparison sampler
@@ -333,6 +334,14 @@ int cubeFace(vec3 dir) {
     return face;
 }
 
+// How far the shadow has faded out at this view depth: 0 = full shadow, 1 =
+// fully lit. y holds 1/span so this is a multiply, and y = 0 disables the fade
+// entirely -- which is how spot and point lights opt out without a branch.
+float shadowFade(int shadow_index, float view_depth) {
+    vec4 f = sh_fade[shadow_index];
+    return clamp((view_depth - f.x) * f.y, 0.0, 1.0);
+}
+
 float shadowFactor(int shadow_index, vec3 world_pos, vec3 N, float view_depth) {
     if (shadow_index < 0) return 1.0;
 
@@ -343,6 +352,12 @@ float shadowFactor(int shadow_index, vec3 world_pos, vec3 N, float view_depth) {
         vec3 to_frag = world_pos - sh_pos[shadow_index].xyz;
         return shadowInCascade(shadow_index, cubeFace(to_frag), world_pos, N);
     }
+
+    // Nothing left to sample past the end of the range: the outermost cascade
+    // has no data out there, so skip the lookup rather than pay for taps whose
+    // result the fade would discard anyway.
+    float fade = shadowFade(shadow_index, view_depth);
+    if (fade >= 1.0) return 1.0;
 
     int cascades = int(sh_info[shadow_index].x);
     int cascade = pickCascade(shadow_index, view_depth);
@@ -370,7 +385,9 @@ float shadowFactor(int shadow_index, vec3 world_pos, vec3 N, float view_depth) {
         }
     }
 
-    return sh;
+    // Fade to fully lit at the far end of the range, so the shadow stops being
+    // drawn before the point where it would simply stop existing.
+    return mix(sh, 1.0, fade);
 }
 #else
 float shadowFactor(int shadow_index, vec3 world_pos, vec3 N, float view_depth) {

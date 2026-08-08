@@ -127,6 +127,7 @@ layout(binding=4) uniform shadow_params {
     vec4 sh_split[MAX_SHADOWED];               // cascade far splits
     vec4 sh_bias[MAX_SHADOWED];                // normal-offset bias per cascade
     vec4 sh_pos[MAX_SHADOWED];                 // xyz light pos, w = 1 if cube
+    vec4 sh_fade[MAX_SHADOWED];                // x fade start, y 1/span, zw reserved
 };
 
 @include_block pbr_brdf

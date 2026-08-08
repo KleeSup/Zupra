@@ -639,6 +639,7 @@ fn packShadowParams(rend: *const ShadowRenderer) ShadowParams {
         p.sh_split[li] = d.splits;
         p.sh_bias[li] = d.normal_bias;
         p.sh_pos[li] = d.pos_kind;
+        p.sh_fade[li] = d.fade;
     }
     return p;
 }

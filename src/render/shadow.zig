@@ -89,6 +89,20 @@ pub const ShadowSettings = struct {
     /// acne. Expressed in texels it converts to world units per cascade and
     /// stays correct in all of them.
     normal_bias_texels: f32 = 1.5,
+    /// Fraction of max_distance over which shadows fade out at the far end of
+    /// their range. 0 disables the fade and restores a hard cutoff.
+    ///
+    /// Without it, shadows simply stop at max_distance and the boundary reads as
+    /// a clean arc across the ground -- more obvious than the cascade seam,
+    /// because it is a step from full shadow to none rather than a change in
+    /// resolution. Fading to fully lit hides where the shadow range ends, which
+    /// is what lets max_distance be tuned for performance instead of for how
+    /// visible its edge is.
+    ///
+    /// Directional lights only. A spot or point light's own attenuation has
+    /// already taken its contribution to nothing by the time its shadow range
+    /// runs out, so there is no edge there to hide.
+    distance_fade: f32 = 0.2,
     /// Width of the cross-fade between adjacent cascades, as a fraction of the
     /// cascade's far split. Without it the switch is instantaneous and shows up
     /// as a hard arc across the ground where resolution and bias change. Costs a

@@ -81,6 +81,16 @@ pub const ShadowData = extern struct {
     /// same value to all four, since every face of a cube shares one fov and one
     /// range, so whichever component the shader reads is the right one.
     normal_bias: [4]f32,
+    /// Distance fade at the far end of the shadow range, as
+    /// x = view depth where the fade starts, y = 1 / (end - start) so the shader
+    /// multiplies instead of dividing, z and w reserved.
+    ///
+    /// y = 0 disables the fade, which is how spot and point lights opt out. The
+    /// two reserved components follow the same reasoning as the unused texels in
+    /// light.zig: per-light shadow controls (strength, normal-bias override) are
+    /// the obvious next additions here, and widening a GPU-side layout later
+    /// means re-churning the packer and all three shader blocks together.
+    fade: [4]f32,
     /// xyz = light world position, w = 1.0 for a cube (point) light, 0.0
     /// otherwise. The shader needs the position to work out which cube face a
     /// fragment falls on, and the flag to know to look at all -- a directional
@@ -207,6 +217,15 @@ pub const ShadowRenderer = struct {
         // parallel, so there is nothing for the shader to select between.
         d.pos_kind = .{ 0, 0, 0, 0 };
 
+        // Fade over the last distance_fade of the range, reaching fully lit
+        // exactly at max_distance -- which is also where the outermost cascade
+        // stops having data, so the fade finishes precisely where the hard edge
+        // would otherwise appear.
+        const fade_end = s.max_distance;
+        const fade_start = fade_end * (1.0 - std.math.clamp(s.distance_fade, 0.0, 1.0));
+        const fade_span = fade_end - fade_start;
+        d.fade = .{ fade_start, if (fade_span > 1e-4) 1.0 / fade_span else 0.0, 0, 0 };
+
         const light_dir = l.direction.normalize();
 
         var c: u32 = 0;
@@ -305,6 +324,8 @@ pub const ShadowRenderer = struct {
         // Position is carried for completeness; kind stays 0 because a spot is
         // a single map and needs no face selection.
         d.pos_kind = .{ l.position.x, l.position.y, l.position.z, 0 };
+        // No distance fade: the cone's own attenuation reaches zero at range.
+        d.fade = .{ 0, 0, 0, 0 };
 
         self.casters.append(self.allocator, .{
             .view_proj = view_proj,
@@ -373,6 +394,9 @@ pub const ShadowRenderer = struct {
         };
         d.splits = @splat(far_z);
         d.pos_kind = .{ l.position.x, l.position.y, l.position.z, 1.0 };
+        // No distance fade: inverse-square falloff has already taken this light
+        // to nothing by the time its shadow range ends.
+        d.fade = .{ 0, 0, 0, 0 };
 
         // Every face shares the fov and range, so one bias serves all six.
         var texel_world: f32 = 0;
