@@ -58,7 +58,13 @@ pub const Framebuffer = struct {
     color_img: sg.Image,
     color_view: sg.View, // color attachment (render into)
     depth_img: sg.Image = .{}, // .id == 0 if no depth
-    depth_view: sg.View = .{},
+    depth_view: sg.View = .{}, // depth-stencil attachment (render into)
+    /// Depth as a TEXTURE view, for passes that read the depth buffer back --
+    /// SSAO, and anything else reconstructing position from depth. Separate
+    /// from depth_view because an attachment view and a texture view are
+    /// different objects to sokol, and binding one where the other is expected
+    /// fails validation (VALIDATE_ABND_EXPECT_TEXVIEW).
+    depth_sample: sg.View = .{},
 
     // MSAA resolve (sample_count == 1 -> resolve_img is the color_img itself)
     resolve_img: sg.Image = .{},
@@ -103,6 +109,7 @@ pub const Framebuffer = struct {
                 .usage = .{ .depth_stencil_attachment = true },
             });
             fb.depth_view = sg.makeView(.{ .depth_stencil_attachment = .{ .image = fb.depth_img } });
+            fb.depth_sample = sg.makeView(.{ .texture = .{ .image = fb.depth_img } });
         }
 
         if (msaa) {
@@ -131,6 +138,7 @@ pub const Framebuffer = struct {
             sg.destroyImage(self.resolve_img);
         }
         if (self.depth_img.id != 0) {
+            sg.destroyView(self.depth_sample);
             sg.destroyView(self.depth_view);
             sg.destroyImage(self.depth_img);
         }

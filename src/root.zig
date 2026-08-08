@@ -78,6 +78,13 @@ pub fn beginDrawing() void {
     beginDrawingPass(.{ .action = action, .swapchain = sokol.glue.swapchain() });
 }
 
+pub fn beginDrawingFramebufferLoadDepth(fb: Framebuffer, clear_color: Color, depth_view: sokol.gfx.View) void {
+    var action = sokol.gfx.PassAction{};
+    action.colors[0] = .{ .load_action = .CLEAR, .clear_value = clear_color };
+    action.depth = .{ .load_action = .LOAD };
+    beginFramebufferPass(fb, fb.passWith(.{ .action = action, .depth_view = depth_view }));
+}
+
 /// Begin a pass that renders INTO a framebuffer instead of the swapchain.
 /// Clears it to `clear_color` first.
 pub fn beginDrawingFramebufferClear(fb: Framebuffer, clear_color: Color) void {

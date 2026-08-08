@@ -152,6 +152,7 @@ pub const SceneRenderer = struct {
     /// most scenes. The deferred path ignores this: its G-buffer pass already
     /// resolves visibility before any lighting runs.
     depth_prepass: bool = true,
+    prepass_fb: Framebuffer = undefined,
 
     /// Depth DRAW CALLS issued by the shadow passes last frame, after culling
     /// and batching, and the number of instances those draws covered. The gap
@@ -213,11 +214,18 @@ pub const SceneRenderer = struct {
         // opaque, and both modes use it to forward-shade transparents.
         self.forward = MeshRenderer.init(cache);
         self.prepass = DepthPrepass.init(cache);
+        self.ssao = Ssao.init(cache, width, height, .{});
         if (mode == .deferred) {
             self.gbuffer = GBuffer.init(width, height);
             self.geo = GeometryRenderer.init(cache);
             self.lit = DeferredRenderer.init(cache);
-            self.ssao = Ssao.init(cache, width, height, .{});
+        } else if (mode == .forward) {
+            self.prepass_fb = Framebuffer.init(.{
+                .width = width,
+                .height = height,
+                .color_format = .RGBA16F,
+                .depth_format = .DEPTH,
+            });
         }
         self.skybox = Skybox.init(cache);
         self.ibl = Ibl.init(allocator, cache);
@@ -233,7 +241,10 @@ pub const SceneRenderer = struct {
             self.lit.deinit();
             self.gbuffer.deinit();
             self.geo.deinit();
+        } else if (self.mode == .forward) {
+            self.prepass_fb.deinit();
         }
+        self.ssao.deinit();
         self.forward.deinit();
         self.prepass.deinit();
         self.post.deinit();
@@ -287,8 +298,17 @@ pub const SceneRenderer = struct {
         if (self.mode == .deferred) {
             self.gbuffer.deinit();
             self.gbuffer = GBuffer.init(rw, rh);
+        } else if (self.mode == .forward) {
+            self.prepass_fb.deinit();
+            self.prepass_fb = Framebuffer.init(.{
+                .width = rw,
+                .height = rh,
+                .color_format = .RGBA16F,
+                .depth_format = .DEPTH,
+            });
         }
         self.post.resize(rw, rh);
+        self.ssao.resize(rw, rh);
         self.width = rw;
         self.height = rh;
     }
@@ -506,22 +526,55 @@ pub const SceneRenderer = struct {
                 self.geo.begin(self.camera, self.gbuffer.passSignature());
             },
             .forward => {
-                zupra.beginDrawingFramebufferClear(self.scene_color, self.clear_color);
-
-                // Depth prepass, inside the same pass so the depth buffer stays
-                // live between the two. Colour writes are masked off, so this
-                // only populates depth and the clear above is untouched.
+                // Prepass first, into its own target: depth for early-z, normals
+                // for AO. Both are sampled before the colour pass begins.
                 if (self.depth_prepass) {
-                    self.prepass.begin(self.camera, self.scene_color.passSignature());
+                    zupra.beginDrawingFramebufferClear(self.prepass_fb, .{ .r = 0, .g = 0, .b = 0, .a = 0 });
+                    self.prepass.begin(self.camera, self.prepass_fb.passSignature());
                     for (self.opaque_queue.items) |e| {
                         if (!self.visible(e.bounds)) continue;
                         self.prepass.draw(e.mesh, e.model, e.material);
                     }
                     self.prepass.end();
+                    zupra.endDrawing();
+
+                    if (self.ssao_enabled) {
+                        self.ssao.render(
+                            self.camera,
+                            self.prepass_fb.depth_sample,
+                            self.prepass_fb.sample_view,
+                        );
+                        self.forward.setSsao(self.ssao.aoView());
+                    } else {
+                        self.forward.setSsao(zupra.intern.white_1x1.view);
+                    }
+                } else {
+                    // No prepass, no normals, no AO. White is the identity for
+                    // the multiply in the shader.
+                    self.forward.setSsao(zupra.intern.white_1x1.view);
+                    zupra.beginDrawingFramebufferClear(self.scene_color, self.clear_color);
+                    self.forward.beginEx(self.camera, self.env, self.scene_color.passSignature());
                 }
                 self.forward.depth_prepass = self.depth_prepass;
 
-                self.forward.beginEx(self.camera, self.env, self.scene_color.passSignature());
+                // Colour pass. When the prepass ran, attach ITS depth and load
+                // it; clearing would discard the buffer the pass exists to test
+                // against. Without a prepass, fall back to the target's own.
+                if (self.depth_prepass) {
+                    zupra.beginDrawingFramebufferLoadDepth(
+                        self.scene_color,
+                        self.clear_color,
+                        self.prepass_fb.depth_view,
+                    );
+                    self.forward.beginEx(
+                        self.camera,
+                        self.env,
+                        self.scene_color.passSignatureWith(self.prepass_fb.depth_format),
+                    );
+                } else {
+                    zupra.beginDrawingFramebufferClear(self.scene_color, self.clear_color);
+                    self.forward.beginEx(self.camera, self.env, self.scene_color.passSignature());
+                }
             },
         }
         for (self.opaque_queue.items) |e| {
@@ -539,6 +592,7 @@ pub const SceneRenderer = struct {
                 if (self.ssao_enabled) {
                     self.ssao.render(self.camera, self.gbuffer.depthTexture().view, self.gbuffer.normalTexture().view);
                     self.lit.setSsao(self.ssao.aoView(), self.ssao.aoSampler());
+                    self.forward.setSsao(self.ssao.aoView()); // FIXME: Should SSAO even be bound for transparents??
                 } else {
                     self.lit.setSsao(zupra.intern.white_1x1.view, self.ssao.aoSampler());
                 }
@@ -622,7 +676,15 @@ pub const SceneRenderer = struct {
     fn opaqueDepthView(self: SceneRenderer) sg.View {
         return switch (self.mode) {
             .deferred => self.gbuffer.depth_view,
-            .forward => self.scene_color.depth_view,
+            // Forward: with a prepass, opaque depth lives in the prepass target
+            // and scene_color's own depth is never written -- the colour pass
+            // attaches the prepass buffer rather than clearing its own. The sky
+            // and transparents must test against the same buffer the opaques
+            // actually filled.
+            .forward => if (self.depth_prepass)
+                self.prepass_fb.depth_view
+            else
+                self.scene_color.depth_view,
         };
     }
 
