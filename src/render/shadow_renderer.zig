@@ -26,6 +26,7 @@ const Vec3 = math.Vec3;
 const Light = light_mod.Light;
 const ShadowAtlas = shadow.ShadowAtlas;
 const ShadowCaster = shadow.ShadowCaster;
+const Frustum = @import("culling.zig").Frustum;
 const ShadowSettings = shadow.ShadowSettings;
 const AtlasRect = shadow.AtlasRect;
 const Mesh = mesh_mod.Mesh;
@@ -197,6 +198,7 @@ pub const ShadowRenderer = struct {
                 .tile_size = tile.size,
                 .depth_bias = s.depth_bias,
                 .depth_bias_slope = s.slope_bias,
+                .frustum = Frustum.fromViewProj(fit.view_proj),
             }) catch {};
         }
 
@@ -281,6 +283,7 @@ pub const ShadowRenderer = struct {
             .tile_size = tile.size,
             .depth_bias = s.depth_bias,
             .depth_bias_slope = s.slope_bias,
+            .frustum = Frustum.fromViewProj(view_proj),
         }) catch {};
 
         self.data[self.data_count] = d;
@@ -374,6 +377,7 @@ pub const ShadowRenderer = struct {
                 .tile_size = tile.size,
                 .depth_bias = s.depth_bias,
                 .depth_bias_slope = s.slope_bias,
+                .frustum = Frustum.fromViewProj(view_proj),
             }) catch {};
         }
 
@@ -432,7 +436,7 @@ pub const ShadowRenderer = struct {
                 origin_top_left,
             );
             // The scene draws its shadow casters through us for this view_proj.
-            scene.drawShadowCasters(self, caster.view_proj, caster.depth_bias, caster.depth_bias_slope, sig);
+            scene.drawShadowCasters(self, caster.view_proj, caster.frustum, caster.depth_bias, caster.depth_bias_slope, sig);
             zupra.endDrawing();
         }
     }

@@ -38,6 +38,7 @@ const PipelineKey = pipeline.PipelineKey;
 const PassSignature = pipeline.PassSignature;
 const Matrix = math.Matrix;
 const Vec3 = math.Vec3;
+const Sphere = @import("culling.zig").Sphere;
 const Color = zupra.Color;
 const Material = material_mod.Material;
 const Light = @import("light.zig").Light;
@@ -106,6 +107,11 @@ pub const Mesh = struct {
     ibuf: sg.Buffer,
     index_count: u32,
     index_type: IndexType,
+    /// Object-space bounding sphere, fitted at upload time. Computed here rather
+    /// than by the caller because this is the only point where the vertex data is
+    /// guaranteed to be in hand -- it goes into an immutable GPU buffer
+    /// immediately after and can never be read back.
+    bounds: Sphere = .empty,
 
     /// `vertices` and `indices` are copied into immutable GPU buffers, so the
     /// caller's data may be freed afterward. The index width is taken from the
@@ -132,6 +138,7 @@ pub const Mesh = struct {
             .vbuf = vbuf,
             .ibuf = ibuf,
             .index_count = idx_count,
+            .bounds = Sphere.fromVertices(Vertex3D, vertices),
             .index_type = std.meta.activeTag(indices),
         };
     }

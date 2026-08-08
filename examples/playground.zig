@@ -91,7 +91,7 @@ var rng = std.Random.DefaultPrng.init(0x9E3779B97F4A7C15);
 
 var fps_accum: f32 = 0;
 var fps_frames: u32 = 0;
-var fps_buf: [128]u8 = undefined;
+var fps_buf: [192]u8 = undefined;
 var fps_text: []const u8 = "";
 
 pub fn main(ctx: std.process.Init) !void {
@@ -344,8 +344,13 @@ pub fn render() void {
         // Caster count is the shadow system's real cost signal: one depth pass
         // per caster per frame. Sun cascades + spot + point faces, so it should
         // read 11 with everything on and 5 with the point light's shadow off.
-        fps_text = std.fmt.bufPrint(&fps_buf, "{d:.0} FPS  {d:.2} ms   lights: {d}   casters: {d}   6/7=+/-16  8=pause  9=point shadow", .{
-            fps, 1000.0 / fps, env.lightCount(), scene.shadows.casters.items.len,
+        // shadow_draws is the depth draws that survived per-view culling; the
+        // uncalled number is queue length times caster count, so the two
+        // together show exactly what the frustum test is rejecting.
+        const uncalled = scene.shadow_queue.items.len * scene.shadows.casters.items.len;
+        fps_text = std.fmt.bufPrint(&fps_buf, "{d:.0} FPS  {d:.2} ms  lights: {d}  casters: {d}  shadow draws: {d}/{d}  6/7=+/-16 8=pause 9=point shadow", .{
+            fps,                1000.0 / fps, env.lightCount(), scene.shadows.casters.items.len,
+            scene.shadow_draws, uncalled,
         }) catch "FPS ?";
         fps_accum = 0;
         fps_frames = 0;

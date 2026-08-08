@@ -27,6 +27,7 @@
 //! test, which is both correct and cheap.
 
 const std = @import("std");
+const culling = @import("culling.zig");
 const sg = @import("sokol").gfx;
 const math = @import("../math.zig");
 const Matrix = math.Matrix;
@@ -57,6 +58,11 @@ pub const ShadowCaster = struct {
     /// Depth bias applied in the depth-only pass (slope-scaled, in the pipeline).
     depth_bias: f32 = 2.0,
     depth_bias_slope: f32 = 3.0,
+    /// This view's frustum, for rejecting casters that cannot affect its tile.
+    /// Derived from view_proj rather than stored per light type, so a cascade's
+    /// orthographic box, a spot's cone and a cube face all cull through exactly
+    /// one code path.
+    frustum: culling.Frustum = .{},
 };
 
 /// Per-light shadow configuration. Defaults are conservative (low cost); a user

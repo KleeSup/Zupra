@@ -40,6 +40,9 @@ const PassSignature = pipeline.PassSignature;
 const Mesh = mesh_mod.Mesh;
 const MeshRenderer = mesh_mod.MeshRenderer;
 const DepthPrepass = @import("depth_prepass.zig").DepthPrepass;
+const culling = @import("culling.zig");
+const Sphere = culling.Sphere;
+const Frustum = culling.Frustum;
 const Material = material_mod.Material;
 const ModelInstance = model_mod.ModelInstance;
 const GBuffer = gbuffer_mod.GBuffer;
@@ -63,6 +66,16 @@ const TransparentEntry = struct {
     model: Matrix,
     material: Material,
     depth: f32, // squared distance to camera, for back-to-front sort
+};
+
+/// A queued shadow caster: the instance plus its world-space bounds, fitted
+/// once at submission. Fitting here rather than inside the per-caster loop
+/// matters -- the loop runs the whole queue once per cascade and per cube face,
+/// so a bound computed there would be recomputed a dozen times a frame for the
+/// same unchanged object.
+const ShadowSubmission = struct {
+    inst: ModelInstance,
+    bounds: Sphere,
 };
 
 const ForwardEntry = struct {
@@ -89,7 +102,7 @@ pub const SceneRenderer = struct {
 
     shadows: ShadowRenderer,
     shadow_params: ShadowParams = undefined,
-    shadow_queue: std.ArrayList(ModelInstance) = .empty,
+    shadow_queue: std.ArrayList(ShadowSubmission) = .empty,
 
     // deferred-only
     gbuffer: GBuffer = undefined,
@@ -106,6 +119,11 @@ pub const SceneRenderer = struct {
     /// most scenes. The deferred path ignores this: its G-buffer pass already
     /// resolves visibility before any lighting runs.
     depth_prepass: bool = true,
+
+    /// Depth draws actually issued by the shadow passes last frame, after
+    /// culling. Compare against shadow_queue.len * caster count to see what the
+    /// per-view frustum test is rejecting.
+    shadow_draws: u32 = 0,
     forward_opaque: std.ArrayList(ForwardEntry) = .empty,
 
     // Opaque submissions for this frame. draw() records into this; end() replays
@@ -225,6 +243,7 @@ pub const SceneRenderer = struct {
         self.forward_opaque.clearRetainingCapacity();
         self.opaque_queue.clearRetainingCapacity();
         self.shadow_queue.clearRetainingCapacity();
+        self.shadow_draws = 0;
 
         // Caster SETUP runs here rather than in end() because it stamps a
         // shadow_index onto each light, and beginFrame below bakes those indices
@@ -258,7 +277,14 @@ pub const SceneRenderer = struct {
     /// submission only records what to draw, and end() runs the passes in
     /// dependency order.
     pub fn draw(self: *SceneRenderer, inst: ModelInstance) void {
-        self.shadow_queue.append(self.allocator, inst) catch {};
+        // World bounds for shadow culling: merge every submesh's object-space
+        // sphere, then push the union through the instance transform once.
+        var bounds: Sphere = .empty;
+        for (inst.model.meshes) |m| bounds = Sphere.merge(bounds, m.bounds);
+        self.shadow_queue.append(self.allocator, .{
+            .inst = inst,
+            .bounds = bounds.transform(inst.modelMatrix()),
+        }) catch {};
         const model_matrix = inst.modelMatrix();
         const dx = self.camera.position.x - inst.position.x;
         const dy = self.camera.position.y - inst.position.y;
@@ -286,16 +312,27 @@ pub const SceneRenderer = struct {
         }
     }
 
+    /// Issue this frame's casters for one shadow view.
+    ///
+    /// Called once per cascade, per spot and per cube face, so without the
+    /// frustum test the cost is queue length times view count -- and most of
+    /// those draws are for geometry the view cannot see. A near cascade covers a
+    /// few metres of a scene tens of metres across; a cube face covers a sixth
+    /// of a sphere. Rejecting on a bounding sphere is one dot product per plane
+    /// against a bound that was already computed at submission.
     pub fn drawShadowCasters(
         self: *SceneRenderer,
         shadows: *ShadowRenderer,
         view_proj: Matrix,
+        frustum: Frustum,
         bias: f32,
         slope: f32,
         sig: PassSignature,
     ) void {
-        for (self.shadow_queue.items) |inst| {
-            shadows.drawModel(inst, view_proj, bias, slope, sig);
+        for (self.shadow_queue.items) |sub| {
+            if (!frustum.intersectsSphere(sub.bounds)) continue;
+            self.shadow_draws += 1;
+            shadows.drawModel(sub.inst, view_proj, bias, slope, sig);
         }
     }
 
