@@ -38,6 +38,7 @@ const PipelineKey = pipeline.PipelineKey;
 const PassSignature = pipeline.PassSignature;
 const Matrix = math.Matrix;
 const Vec3 = math.Vec3;
+const Sphere = @import("culling.zig").Sphere;
 const Color = zupra.Color;
 const Material = material_mod.Material;
 const Light = @import("light.zig").Light;
@@ -106,6 +107,11 @@ pub const Mesh = struct {
     ibuf: sg.Buffer,
     index_count: u32,
     index_type: IndexType,
+    /// Object-space bounding sphere, fitted at upload time. Computed here rather
+    /// than by the caller because this is the only point where the vertex data is
+    /// guaranteed to be in hand -- it goes into an immutable GPU buffer
+    /// immediately after and can never be read back.
+    bounds: Sphere = .empty,
 
     /// `vertices` and `indices` are copied into immutable GPU buffers, so the
     /// caller's data may be freed afterward. The index width is taken from the
@@ -132,6 +138,7 @@ pub const Mesh = struct {
             .vbuf = vbuf,
             .ibuf = ibuf,
             .index_count = idx_count,
+            .bounds = Sphere.fromVertices(Vertex3D, vertices),
             .index_type = std.meta.activeTag(indices),
         };
     }
@@ -143,6 +150,26 @@ pub const Mesh = struct {
 };
 
 // --- draw path ---
+
+/// Whether a material's geometry can be laid down by the depth prepass.
+///
+/// This lives next to the draw that makes the inverse decision about depth
+/// writes, because the two have to agree exactly: geometry in the prepass must
+/// NOT write depth again, and geometry outside it MUST. Splitting the rule
+/// across two files is how that invariant quietly breaks later.
+///
+/// Excluded, and why:
+///   blend  - no single depth to record; drawn sorted, after everything.
+///   mask   - needs the fragment shader to discard, which a position-only pass
+///            can't do; cut-outs would be laid down as solid.
+///   unlit / custom shader - may use a vertex layout other than .mesh, and the
+///            prepass binds .mesh. A stride mismatch reads garbage.
+pub fn depthPrepassEligible(material: Material) bool {
+    if (material.alpha_mode != .opaque_) return false;
+    if (material.shader != null) return false;
+    if (material.shading == .unlit) return false;
+    return true;
+}
 
 pub const MeshRenderer = struct {
     cache: *PipelineCache,
@@ -158,6 +185,14 @@ pub const MeshRenderer = struct {
     ibl_prefilter: sg.View = .{},
     ibl_brdf_lut: sg.View = .{},
     ibl_sampler: sg.Sampler = .{},
+
+    shadow_atlas: sg.View = .{},
+    shadow_sampler: sg.Sampler = .{},
+    shadow_params: *const shd.ShadowParams = undefined,
+
+    /// Set by the owner when a DepthPrepass runs ahead of this renderer in the
+    /// same pass. Affects depth writes only -- shading is identical either way.
+    depth_prepass: bool = false,
 
     pub fn init(cache: *PipelineCache) MeshRenderer {
         return .{
@@ -182,6 +217,12 @@ pub const MeshRenderer = struct {
         self.ibl_prefilter = prefilter;
         self.ibl_brdf_lut = brdf_lut;
         self.ibl_sampler = sampler;
+    }
+
+    pub fn setShadows(self: *MeshRenderer, atlas: sg.View, sampler: sg.Sampler, params: *const shd.ShadowParams) void {
+        self.shadow_atlas = atlas;
+        self.shadow_sampler = sampler;
+        self.shadow_params = params;
     }
 
     pub fn begin(self: *MeshRenderer, camera: Camera3D, env: *Environment) void {
@@ -216,7 +257,15 @@ pub const MeshRenderer = struct {
             .cull = material.cullMode(),
             .blend = material.blendMode(),
             .depth_test = true,
-            .depth_write = material.alpha_mode != .blend,
+            // With a prepass ahead of this draw, depth for eligible geometry is
+            // already final, so writing it again is wasted bandwidth and forfeits
+            // the early-z rejection the prepass exists to buy. Anything the
+            // prepass skipped still has to write its own depth, which is why this
+            // consults the same predicate instead of a plain flag.
+            .depth_write = if (self.depth_prepass and depthPrepassEligible(material))
+                false
+            else
+                material.alpha_mode != .blend,
             .face_winding = .CCW,
         };
         const pip = self.cache.get(key) catch |err| {
@@ -259,6 +308,7 @@ pub const MeshRenderer = struct {
                     bindings.views[shd_unlit.VIEW_base_color_map] = material.map(.base_color).view;
                     bindings.views[shd_unlit.VIEW_emissive_map] = material.map(.emissive).view;
                     bindings.samplers[shd_unlit.SMP_smp_material] = mat_smp;
+
                     unlit_fs = .{
                         .base_color = .{ bc.r, bc.g, bc.b, bc.a },
                         .emissive = .{ emc.r, emc.g, emc.b, es },
@@ -269,6 +319,9 @@ pub const MeshRenderer = struct {
                     bindings.views[shd_lambert.VIEW_base_color_map] = material.map(.base_color).view;
                     bindings.views[shd_lambert.VIEW_emissive_map] = material.map(.emissive).view;
                     bindings.samplers[shd_lambert.SMP_smp_material] = mat_smp;
+
+                    bindings.views[shd_lambert.VIEW_shadow_atlas] = self.shadow_atlas;
+                    bindings.samplers[shd_lambert.SMP_smp_shadow] = self.shadow_sampler;
 
                     self.lighting.bind(&bindings, .{
                         .light_data = shd_lambert.VIEW_light_data,
@@ -294,6 +347,9 @@ pub const MeshRenderer = struct {
                     bindings.views[shd.VIEW_metallic_roughness_map] = material.map(.metallic_roughness).view;
                     bindings.views[shd.VIEW_occlusion_map] = material.map(.occlusion).view;
                     bindings.samplers[shd.SMP_smp_material] = mat_smp;
+
+                    bindings.views[shd.VIEW_shadow_atlas] = self.shadow_atlas;
+                    bindings.samplers[shd.SMP_smp_shadow] = self.shadow_sampler;
 
                     self.lighting.bind(&bindings, .{
                         .light_data = shd.VIEW_light_data,
@@ -344,6 +400,7 @@ pub const MeshRenderer = struct {
                     sg.applyUniforms(shd_lambert.UB_uv_params, sg.asRange(&uvp));
                     var lp = self.lighting.params();
                     sg.applyUniforms(shd_lambert.UB_light_params, sg.asRange(&lp));
+                    sg.applyUniforms(shd_lambert.UB_shadow_params, sg.asRange(self.shadow_params));
                 },
                 .pbr => {
                     sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&pbr_fs));
@@ -351,6 +408,7 @@ pub const MeshRenderer = struct {
                     sg.applyUniforms(shd.UB_uv_params, sg.asRange(&uvp));
                     var lp = self.lighting.params();
                     sg.applyUniforms(shd.UB_light_params, sg.asRange(&lp));
+                    sg.applyUniforms(shd.UB_shadow_params, sg.asRange(self.shadow_params));
                 },
             }
         }

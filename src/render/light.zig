@@ -45,6 +45,7 @@ const math = @import("../math.zig");
 const Vec3 = math.Vec3;
 const DEG_TO_RAD = math.DEG_TO_RAD;
 const Color = @import("../root.zig").Color;
+const ShadowSettings = @import("shadow.zig").ShadowSettings;
 
 /// Area types are declared but not yet evaluated by the shader — the layout
 /// reserves their storage so adding them is shader work only.
@@ -72,6 +73,14 @@ pub const Light = struct {
     /// zero at outer.
     spot_inner_deg: f32 = 20.0,
     spot_outer_deg: f32 = 30.0,
+
+    /// Shadow configuration. Off by default (shadows cost a depth pass + atlas
+    /// space, so they're opt-in per light).
+    shadow: ShadowSettings = .{},
+    /// Runtime slot into the shadow_data array, assigned by ShadowRenderer.build
+    /// each frame (-1 = not shadowed this frame). Baked into the light texture so
+    /// the shading shader can look up this light's shadow map.
+    shadow_index: i32 = -1,
 
     /// Area-light extent (rect/tube). Unused by point/spot; reserved so the GPU
     /// layout doesn't change when area lights land.
@@ -173,14 +182,14 @@ pub const LightStore = struct {
     allocator: std.mem.Allocator,
 
     /// Packed and sorted by type. Indices here are NOT stable across mutation.
-    lights: std.ArrayListUnmanaged(Light) = .empty,
+    lights: std.ArrayList(Light) = .empty,
     /// Parallel to `lights`: which handle owns each slot. Used to patch the map
     /// after a re-sort.
-    owners: std.ArrayListUnmanaged(u32) = .empty,
+    owners: std.ArrayList(u32) = .empty,
     /// handle id -> index into `lights`. Sparse; invalid entries are invalid_id.
-    handle_to_index: std.ArrayListUnmanaged(u32) = .empty,
+    handle_to_index: std.ArrayList(u32) = .empty,
     /// Recycled handle ids, so long-running scenes don't grow the map forever.
-    free_handles: std.ArrayListUnmanaged(u32) = .empty,
+    free_handles: std.ArrayList(u32) = .empty,
 
     /// Index of the first punctual light in `lights`. Everything before it is
     /// directional. Maintained by the sort.
@@ -388,7 +397,7 @@ pub const LightStore = struct {
             self.staging.items[base + 3] = .{
                 @cos(l.spot_inner_deg * DEG_TO_RAD),
                 @cos(l.spot_outer_deg * DEG_TO_RAD),
-                0,
+                @floatFromInt(l.shadow_index), // shadow slot (-1 = unshadowed)
                 0,
             };
             // Reserved for area lights; zero for point/spot.
@@ -439,7 +448,7 @@ pub const LightStore = struct {
         p.cluster_depth = .{ camera_near, camera_far, if (origin_top_left) 1.0 else 0.0, 0 };
 
         for (dirs[0..n], 0..) |l, i| {
-            p.dir_direction[i] = .{ l.direction.x, l.direction.y, l.direction.z, 0 };
+            p.dir_direction[i] = .{ l.direction.x, l.direction.y, l.direction.z, @floatFromInt(l.shadow_index) };
             p.dir_color[i] = .{ l.color.r, l.color.g, l.color.b, l.intensity };
         }
         return p;

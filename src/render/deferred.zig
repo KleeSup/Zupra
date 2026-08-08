@@ -181,6 +181,10 @@ pub const DeferredRenderer = struct {
     ibl_brdf_lut: sg.View = .{},
     ibl_sampler: sg.Sampler = .{},
 
+    shadow_atlas: sg.View = .{},
+    shadow_sampler: sg.Sampler = .{},
+    shadow_params: *const shd_light.ShadowParams = undefined,
+
     pub fn init(cache: *PipelineCache) DeferredRenderer {
         const shader = sg.makeShader(shd_light.deferredLightingShaderDesc(sg.queryBackend()));
         const sampler = sg.makeSampler(.{
@@ -219,6 +223,12 @@ pub const DeferredRenderer = struct {
         self.ibl_prefilter = prefilter;
         self.ibl_brdf_lut = brdf_lut;
         self.ibl_sampler = sampler;
+    }
+
+    pub fn setShadows(self: *DeferredRenderer, atlas: sg.View, sampler: sg.Sampler, params: *const shd_light.ShadowParams) void {
+        self.shadow_atlas = atlas;
+        self.shadow_sampler = sampler;
+        self.shadow_params = params;
     }
 
     pub fn render(
@@ -275,6 +285,9 @@ pub const DeferredRenderer = struct {
             .sampler = shd_light.SMP_smp_data,
         });
 
+        bindings.views[shd_light.VIEW_shadow_atlas] = self.shadow_atlas;
+        bindings.samplers[shd_light.SMP_smp_shadow] = self.shadow_sampler;
+
         // Samplers: smp (G-buffer, NEAREST) and smp_cube (IBL, filtering).
         bindings.samplers[shd_light.SMP_smp] = self.sampler;
         bindings.samplers[shd_light.SMP_smp_cube] = self.ibl_sampler;
@@ -283,6 +296,7 @@ pub const DeferredRenderer = struct {
         sg.applyBindings(bindings);
         sg.applyUniforms(shd_light.UB_light_params, sg.asRange(&lp));
         sg.applyUniforms(shd_light.UB_recon_params, sg.asRange(&recon));
+        sg.applyUniforms(shd_light.UB_shadow_params, sg.asRange(self.shadow_params));
         sg.draw(0, 3, 1);
     }
 };

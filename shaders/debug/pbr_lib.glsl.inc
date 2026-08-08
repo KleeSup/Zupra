@@ -181,16 +181,13 @@ int punctualShadowIndex(int idx) {
 //  Shadows. shadowFactor() returns 1.0 (fully lit) .. 0.0 (fully shadowed).
 //  The including shader must, when it wants shadows, declare:
 //
-//    #define MAX_SHADOW_VIEWS 6
+//    #define MAX_CASCADES 4
 //    #define MAX_SHADOWED 16
 //    layout(binding=?) uniform shadow_params {
-//        vec4 sh_vp[MAX_SHADOWED * MAX_SHADOW_VIEWS];  // 4 vec4 per mat4
-//        vec4 sh_rect[MAX_SHADOWED * MAX_SHADOW_VIEWS];// atlas rect per view
-//        vec4 sh_info[MAX_SHADOWED];   // x cascades, y pcf radius, z blend, w texel
+//        vec4 sh_vp[MAX_SHADOWED * MAX_CASCADES];  // 4 vec4 per mat4, see index
+//        vec4 sh_rect[MAX_SHADOWED * MAX_CASCADES];// atlas rect per cascade
+//        vec4 sh_info[MAX_SHADOWED];   // x cascades, y pcf radius, z normal bias, w texel
 //        vec4 sh_split[MAX_SHADOWED];  // cascade far splits (view depth)
-//        vec4 sh_bias[MAX_SHADOWED];   // normal-offset bias (world), per cascade
-//        vec4 sh_pos[MAX_SHADOWED];    // xyz light position, w = 1 if cube
-//        vec4 sh_fade[MAX_SHADOWED];   // x fade start, y 1/span, zw reserved
 //    };
 //    uniform texture2D shadow_atlas;
 //    uniform samplerShadow smp_shadow;  // comparison sampler
@@ -203,35 +200,8 @@ mat4 shadowMatrix(int shadow_index, int cascade) {
     // sh_vp packs one mat4 as 4 consecutive vec4 ROWS (the CPU side is
     // row-major). mat4() consumes them as COLUMNS, so what comes back is the
     // transpose -- which is exactly what the M * v multiply downstream wants.
-    int o = (shadow_index * MAX_SHADOW_VIEWS + cascade) * 4;
+    int o = (shadow_index * MAX_CASCADES + cascade) * 4;
     return mat4(sh_vp[o + 0], sh_vp[o + 1], sh_vp[o + 2], sh_vp[o + 3]);
-}
-
-// Runtime vec4-component indexing (v[c] with a non-constant c) can't be
-// flattened on the glsl300es legacy target, so every per-cascade lookup below
-// spells the components out.
-//
-// Both are written as one initialised local assigned through an if/else chain
-// rather than a series of early returns. Equivalent in GLSL, but SPIRV-Cross
-// rewrites early returns into a temp guarded by branch flags, and FXC then
-// can't prove the temp is assigned on every path -- which produces a stream of
-// X4000 "potentially uninitialized variable" warnings on the D3D11 backend.
-float cascadeSplit(int shadow_index, int cascade) {
-    vec4 splits = sh_split[shadow_index];
-    float v = splits.w;
-    if (cascade == 0) v = splits.x;
-    else if (cascade == 1) v = splits.y;
-    else if (cascade == 2) v = splits.z;
-    return v;
-}
-
-float cascadeNormalBias(int shadow_index, int cascade) {
-    vec4 b = sh_bias[shadow_index];
-    float v = b.w;
-    if (cascade == 0) v = b.x;
-    else if (cascade == 1) v = b.y;
-    else if (cascade == 2) v = b.z;
-    return v;
 }
 
 int pickCascade(int shadow_index, float view_depth) {
@@ -259,49 +229,29 @@ float sampleShadow(int shadow_index, int cascade, vec3 world_pos, float ndotl) {
     // Light clip [-1,1] xy -> [0,1], then into the cascade's atlas rect.
     vec2 uv = proj.xy * 0.5 + 0.5;
     if (cluster_depth.z > 0.5) uv.y = 1.0 - uv.y; // match backend depth origin
-    vec4 rect = sh_rect[shadow_index * MAX_SHADOW_VIEWS + cascade];
+    vec4 rect = sh_rect[shadow_index * MAX_CASCADES + cascade];
+    vec2 atlas_uv = rect.xy + uv * rect.zw;
 
     float depth_ref = proj.z; // sokol [0,1] clip depth
 
-    // Past the far plane there is no data for any light type.
-    if (depth_ref > 1.0) return 1.0;
-
-    // Outside the frustum -> lit, but ONLY for light types that have an
-    // outside. A spot's cone and a cascade's box both end somewhere, and beyond
-    // that edge there is genuinely nothing recorded.
-    //
-    // A cube has no outside: its six faces tile the sphere completely, so every
-    // fragment belongs to exactly one of them. At a face boundary the
-    // projection lands exactly on 0 or 1 and rounding pushes it a hair past,
-    // and the normal-offset bias nudges the sample point across the seam as
-    // well -- so this test would report "lit" along every seam and draw bright
-    // lines where the faces meet. The tap clamping below keeps those samples
-    // inside their own tile, which is the correct answer there.
-    if (sh_pos[shadow_index].w < 0.5) {
-        if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) return 1.0;
+    // Outside the light frustum -> lit (no shadow data there).
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || depth_ref > 1.0) {
+#ifdef ZUPRA_SHADOW_DEBUG
+        return 2.0; // sentinel: fragment fell OUTSIDE the light frustum
+#else
+        return 1.0;
+#endif
     }
 
     // PCF: NxN comparison-sampled taps. The comparison sampler returns the
     // fraction of the 2x2 that passes per tap; averaging taps softens further.
-    //
-    // Taps are offset and CLAMPED in tile space, then mapped into the atlas.
-    // Offsetting in atlas space instead lets a tap at a tile border wander into
-    // the neighbouring tile, which is a different cascade, a different cube face
-    // or a different light entirely -- and reads as a hard wrong-shadow fringe
-    // along every tile edge. The half-texel inset accounts for the comparison
-    // sampler's own 2x2 footprint, which reaches half a texel past the tap.
     float texel = sh_info[shadow_index].w;
     int radius = int(sh_info[shadow_index].y);
-    vec2 tile_texel = vec2(texel) / max(rect.zw, vec2(1e-6));
-    vec2 lo = tile_texel * 0.5;
-    vec2 hi = vec2(1.0) - lo;
-
     float sum = 0.0;
     float count = 0.0;
     for (int y = -radius; y <= radius; y++) {
         for (int x = -radius; x <= radius; x++) {
-            vec2 tuv = clamp(uv + vec2(float(x), float(y)) * tile_texel, lo, hi);
-            vec2 t = rect.xy + tuv * rect.zw;
+            vec2 t = atlas_uv + vec2(float(x), float(y)) * texel;
             sum += textureLod(sampler2DShadow(shadow_atlas, smp_shadow), vec3(t, depth_ref), 0.0);
             count += 1.0;
         }
@@ -309,85 +259,14 @@ float sampleShadow(int shadow_index, int cascade, vec3 world_pos, float ndotl) {
     return sum / max(count, 1.0);
 }
 
-// Sample one cascade with its own normal-offset bias. The bias is per cascade
-// because a texel covers a different amount of world space in each, and the
-// offset has to clear roughly one texel to beat acne.
-float shadowInCascade(int shadow_index, int cascade, vec3 world_pos, vec3 N) {
-    vec3 biased = world_pos + N * cascadeNormalBias(shadow_index, cascade);
-    return sampleShadow(shadow_index, cascade, biased, 1.0);
-}
-
-// Which cube face a direction falls on, in the order buildPoint fills them:
-// +X, -X, +Y, -Y, +Z, -Z. The dominant axis picks the face; its sign picks which
-// of the pair. Written as one assigned local rather than early returns, for the
-// same FXC reason as cascadeSplit above.
-int cubeFace(vec3 dir) {
-    vec3 a = abs(dir);
-    int face;
-    if (a.x >= a.y && a.x >= a.z) {
-        face = dir.x > 0.0 ? 0 : 1;
-    } else if (a.y >= a.z) {
-        face = dir.y > 0.0 ? 2 : 3;
-    } else {
-        face = dir.z > 0.0 ? 4 : 5;
-    }
-    return face;
-}
-
-// How far the shadow has faded out at this view depth: 0 = full shadow, 1 =
-// fully lit. y holds 1/span so this is a multiply, and y = 0 disables the fade
-// entirely -- which is how spot and point lights opt out without a branch.
-float shadowFade(int shadow_index, float view_depth) {
-    vec4 f = sh_fade[shadow_index];
-    return clamp((view_depth - f.x) * f.y, 0.0, 1.0);
-}
-
 float shadowFactor(int shadow_index, vec3 world_pos, vec3 N, float view_depth) {
     if (shadow_index < 0) return 1.0;
-
-    // Point light: pick the cube face the fragment lies on and sample it. No
-    // cascades and nothing to blend -- the six faces tile the sphere edge to
-    // edge rather than nesting, so a fragment belongs to exactly one.
-    if (sh_pos[shadow_index].w > 0.5) {
-        vec3 to_frag = world_pos - sh_pos[shadow_index].xyz;
-        return shadowInCascade(shadow_index, cubeFace(to_frag), world_pos, N);
-    }
-
-    // Nothing left to sample past the end of the range: the outermost cascade
-    // has no data out there, so skip the lookup rather than pay for taps whose
-    // result the fade would discard anyway.
-    float fade = shadowFade(shadow_index, view_depth);
-    if (fade >= 1.0) return 1.0;
-
-    int cascades = int(sh_info[shadow_index].x);
     int cascade = pickCascade(shadow_index, view_depth);
-    float sh = shadowInCascade(shadow_index, cascade, world_pos, N);
-
-    // CASCADE BLEND. Adjacent cascades differ in resolution, in fitted extent
-    // and in bias, so switching between them at a hard threshold draws a visible
-    // arc across the ground wherever that threshold falls. Fading across a band
-    // just inside the split hides the transition.
-    //
-    // The band is a fraction of the split distance rather than a fixed width, so
-    // it scales with the cascade -- a metre-wide band is generous near the
-    // camera and invisibly thin out at the far split.
-    //
-    // Only fragments inside the band pay for the second lookup; everything else
-    // takes the branch once. On the last cascade there's nothing to blend into,
-    // and the distance fade (later) takes over instead.
-    if (cascade + 1 < cascades) {
-        float split = cascadeSplit(shadow_index, cascade);
-        float band = split * sh_info[shadow_index].z;
-        if (band > 0.0 && view_depth > split - band) {
-            float t = clamp((view_depth - (split - band)) / band, 0.0, 1.0);
-            float next = shadowInCascade(shadow_index, cascade + 1, world_pos, N);
-            sh = mix(sh, next, t);
-        }
-    }
-
-    // Fade to fully lit at the far end of the range, so the shadow stops being
-    // drawn before the point where it would simply stop existing.
-    return mix(sh, 1.0, fade);
+    // Normal-offset bias: push the sample point along the surface normal to
+    // fight acne without the peter-panning heavy depth bias causes.
+    float nb = sh_info[shadow_index].z;
+    vec3 biased = world_pos + N * nb;
+    return sampleShadow(shadow_index, cascade, biased, 1.0);
 }
 #else
 float shadowFactor(int shadow_index, vec3 world_pos, vec3 N, float view_depth) {
@@ -469,6 +348,23 @@ vec3 pbrShade(vec3 world_pos, vec3 N, vec3 V, vec3 albedo,
 
     vec3 ambient = (kD * diffuse + specular) * ao;
     vec3 result = ambient + Lo;
+
+#ifdef ZUPRA_SHADOW_DEBUG
+    // Override the final color with a shadow diagnostic for directional light 0,
+    // AFTER computing real shading so no bindings get stripped by shdc.
+    //   BLUE  = fragment projected OUTSIDE the light frustum (projection wrong).
+    //   RED   = in shadow.   GREEN = lit.   MAGENTA = light 0 has no shadow idx.
+    // A tiny amount of `result` is mixed in (0.0001) so it can't be stripped.
+    int dbg_si = int(dir_direction[0].w);
+    vec3 dbg;
+    if (dbg_si >= 0) {
+        float f = shadowFactor(dbg_si, world_pos, N, view_depth);
+        dbg = (f > 1.5) ? vec3(0.0, 0.0, 1.0) : vec3(1.0 - f, f, 0.0);
+    } else {
+        dbg = vec3(1.0, 0.0, 1.0);
+    }
+    return dbg + result * 0.0001;
+#endif
 
     return result;
 }

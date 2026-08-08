@@ -5,6 +5,7 @@ const Build = std.Build;
 pub fn build(b: *Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const build_example = b.option(bool, "example", "Build the playground executable (default: Debug only)") orelse (optimize == .Debug);
 
     // == Dependencies ==
 
@@ -60,7 +61,7 @@ pub fn build(b: *Build) !void {
         },
     });
 
-    const root_source = if (optimize == .Debug) example_mod else root_mod;
+    const root_source = if (build_example) example_mod else root_mod;
 
     // build for wasm (emscripten)
     if (target.result.cpu.arch.isWasm()) {
@@ -97,7 +98,7 @@ pub fn build(b: *Build) !void {
         });
         b.installArtifact(compile_step);
     } else { // build native (desktop)
-        if (optimize == .Debug) {
+        if (build_example) {
             compile_step = b.addExecutable(.{
                 .name = "Zupra",
                 .root_module = root_source,

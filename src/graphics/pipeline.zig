@@ -17,6 +17,7 @@ pub const VertexLayout = enum {
     mesh_unlit, // Vertex3D buffer with only pos, normal and uv for unlit scenes.
     debug, // VertexDebug
     fullscreen, // Vertex2D buffer, only pos+uv consumed (screen-space passes)
+    mesh_instanced,
 
     /// Build the sokol vertex-layout state for this layout. Offsets and stride
     /// are set explicitly so behavior never depends on sokol's auto-layout.
@@ -52,6 +53,25 @@ pub const VertexLayout = enum {
                 l.buffers[0].stride = @sizeOf(Vertex2D);
                 l.attrs[0] = .{ .offset = @offsetOf(Vertex2D, "pos"), .format = .FLOAT2 };
                 l.attrs[1] = .{ .offset = @offsetOf(Vertex2D, "uv"), .format = .FLOAT2 };
+            },
+            .mesh_instanced => {
+                // Buffer 0: the ordinary per-vertex stream, identical to .mesh.
+                l.buffers[0].stride = @sizeOf(Vertex3D);
+                l.attrs[0] = .{ .offset = @offsetOf(Vertex3D, "pos"), .format = .FLOAT3 };
+                l.attrs[1] = .{ .offset = @offsetOf(Vertex3D, "normal"), .format = .FLOAT3 };
+                l.attrs[2] = .{ .offset = @offsetOf(Vertex3D, "uv"), .format = .FLOAT2 };
+                l.attrs[3] = .{ .offset = @offsetOf(Vertex3D, "tangent"), .format = .FLOAT4 };
+                l.attrs[4] = .{ .offset = @offsetOf(Vertex3D, "uv1"), .format = .FLOAT2 };
+
+                // Buffer 1: one model matrix per instance, as four FLOAT4 rows.
+                // PER_INSTANCE: Advances this buffer once per instance instead of once per vertex, so the same
+                // index range is redrawn with a different transform each time.
+                l.buffers[1].stride = 16 * @sizeOf(f32);
+                l.buffers[1].step_func = .PER_INSTANCE;
+                l.attrs[5] = .{ .buffer_index = 1, .offset = 0, .format = .FLOAT4 };
+                l.attrs[6] = .{ .buffer_index = 1, .offset = 16, .format = .FLOAT4 };
+                l.attrs[7] = .{ .buffer_index = 1, .offset = 32, .format = .FLOAT4 };
+                l.attrs[8] = .{ .buffer_index = 1, .offset = 48, .format = .FLOAT4 };
             },
         }
         return l;
@@ -144,9 +164,21 @@ pub const PipelineKey = struct {
     depth_write: bool = false,
     face_winding: sg.FaceWinding = .CCW,
 
+    depth_bias_bits: u32 = 0,
+    depth_bias_slope_bits: u32 = 0,
+    depth_bias_clamp_bits: u32 = 0,
+
+    color_write_mask: sg.ColorMask = .RGBA,
+
     /// false = non-indexed draw (sokol index_type = .NONE). Debug lines/fills
     /// and fullscreen post-fx triangles use this, but indexed meshes/sprites = true.
     indexed: bool = true,
+
+    pub fn setDepthBias(self: *PipelineKey, bias: f32, slope_scale: f32, clamp: f32) void {
+        self.depth_bias_bits = @bitCast(bias);
+        self.depth_bias_slope_bits = @bitCast(slope_scale);
+        self.depth_bias_clamp_bits = @bitCast(clamp);
+    }
 };
 
 /// Maps the framework index tag to sokol's enum.
@@ -172,16 +204,24 @@ fn buildDesc(key: PipelineKey) sg.PipelineDesc {
         .pixel_format = key.pass.depth_format,
         .compare = if (key.depth_test) .LESS_EQUAL else .ALWAYS,
         .write_enabled = key.depth_write,
+        .bias = @bitCast(key.depth_bias_bits),
+        .bias_slope_scale = @bitCast(key.depth_bias_slope_bits),
+        .bias_clamp = @bitCast(key.depth_bias_clamp_bits),
     };
 
     desc.color_count = @intCast(key.pass.color_count);
-    const blend = key.blend.state();
-    var i: usize = 0;
-    while (i < key.pass.color_count and i < max_color_attachments) : (i += 1) {
-        desc.colors[i] = .{
-            .pixel_format = key.pass.color_formats[i],
-            .blend = blend,
-        };
+    if (key.pass.color_count == 0) {
+        desc.colors[0].pixel_format = .NONE;
+    } else {
+        const blend = key.blend.state();
+        var i: usize = 0;
+        while (i < key.pass.color_count and i < max_color_attachments) : (i += 1) {
+            desc.colors[i] = .{
+                .pixel_format = key.pass.color_formats[i],
+                .blend = blend,
+                .write_mask = key.color_write_mask,
+            };
+        }
     }
     return desc;
 }

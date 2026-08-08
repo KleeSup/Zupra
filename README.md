@@ -40,14 +40,18 @@ the end, so bloom, colour grading and other effects operate on real light values
 - Perspective camera (100%)
 - Orthographic camera (100%)
 - First-person controller (100%)
-- Frustum culling
+- Frustum culling (bounding sphere, per submesh) (100%)
+- Spatial acceleration for large scenes (BVH / grid)
 
 ### Meshes & models
 - Static meshes (100%)
 - Multi-material models (100%)
-- Instancing (100%)
+- Placed instances sharing one model's GPU buffers (100%)
+- GPU instancing: shadow / depth passes (100%)
+- GPU instancing: shading passes (needs per-instance material data)
 - Mesh builder: cube, plane, sphere (100%)
 - Shared-buffer geometry consolidation (one buffer per model, not per primitive)
+- Per-mesh bounding volumes (100%)
 - Dynamic / streamed meshes
 - Skeletal animation & skinning
 - Morph targets
@@ -81,8 +85,10 @@ the end, so bloom, colour grading and other effects operate on real light values
 - Clustered forward / deferred (froxel grid, per-pixel light lists) (100%)
 - Directional, point, spot lights (100%)
 - Stable light handles, unbounded scene light count (100%)
+- Depth prepass (Forward+): shading runs once per visible fragment (100%)
 - Area (rect / tube) lights (storage reserved, LTC evaluation pending)
 - Importance-based per-cluster light selection (graceful overflow)
+- Cluster occupancy stats (max / average lights per froxel)
 - GPU cluster assignment (compute) for very high light counts
 - Light cookies / IES profiles
 
@@ -102,11 +108,16 @@ the end, so bloom, colour grading and other effects operate on real light values
 - Reflection probes (blending, box projection)
 
 ### Shadows
-- Directional shadow map (single cascade), PCF
-- Cascaded shadow maps (CSM), stable cascades, cascade blending
-- Spot shadow maps
-- Point-light cubemap shadows
-- Shadow atlas, distance fade, cached static shadows
+- Directional shadow maps, PCF (100%)
+- Cascaded shadow maps: stable texel-snapped cascades, cascade blending (100%)
+- Per-cascade normal-offset bias, slope-scaled depth bias (100%)
+- Spot shadow maps (100%)
+- Point-light cubemap shadows (six atlas tiles) (100%)
+- Shadow atlas with per-light tile allocation (100%)
+- Per-view caster frustum culling + instanced depth passes (100%)
+- Distance fade
+- Cached static shadows (needs a static / dynamic geometry tag)
+- Priority-based atlas allocation under contention
 - PCSS / EVSM soft shadows
 
 ### Anti-aliasing
@@ -150,28 +161,37 @@ the end, so bloom, colour grading and other effects operate on real light values
 - Pipeline-state cache (100%)
 - Downstream shader compilation against framework includes (100%)
 - Asset hot-reload
-- In-app debug overlays (frame stats, cluster heatmap)
+- Frame stats overlay: draw counts, culling and instancing ratios (100%)
+- Cluster heatmap / froxel occupancy overlay
 
 ## Roadmap
 
 Near-term, in order:
 
-1. **Shadows:** directional shadow map first (PCF), then cascades, then spot and
-   point. The clustered light data is laid out so shadow parameters index in
-   parallel with lights, so the shading-side lookup is a small addition.
+1. **Shadow polish:** distance fade at the shadow range limit, priority-based
+   atlas allocation when lights contend for tiles, and cached static shadows.
+   The last of these needs a static / dynamic geometry tag, since every caster
+   is currently re-rendered every frame.
 2. **HDR environment loading:** the IBL bake chain is complete but it needs an
    equirectangular `.hdr` source to replace the procedural sky, which is the
    largest single step up in reflective-material quality.
-3. **Bloom:** an HDR-stage post effect (emissive output is already HDR).
+3. **Bloom:** an HDR-stage post effect. Emissive already writes HDR values, so
+   the input is there.
 4. **SSAO / GTAO:** the deferred G-buffer already carries depth and normals.
 
-Medium-term: skeletal animation and skinning; shared-buffer geometry
-consolidation for large scenes; SSR; TAA (via a velocity buffer that also feeds
-motion blur and SSR reprojection); reflection probes.
+Longer term, one architectural question shapes several of the above. Submission
+is immediate-mode: `scene.draw()` records a fresh list each frame and discards it
+at `end()`. That keeps the API simple and makes correctness easy to reason about,
+but it means culling is a linear scan and a spatial structure would have to be
+rebuilt every frame. Scaling past thousands of objects, and caching static
+shadow tiles, both point toward a **retained render world** — insert / update /
+remove handles for renderables — living alongside the immediate API rather than
+replacing it.
 
-Longer-term: advanced material extensions (transmission, clearcoat, sheen);
-Draco / KTX2 asset compression; area lights; global illumination; a broader
-tooling and debug-overlay layer.
+Until then, projects with their own broadphase can set
+`SceneRenderer.frustum_culling = false` and simply not submit what they have
+already rejected. One rule matters when doing so: **do not camera-cull shadow
+submissions.** An object behind the camera can still cast a shadow into view.
 
 ## Dependencies
 
