@@ -69,6 +69,34 @@ pub const GridDims = struct {
 /// per-pixel cost).
 pub const default_cluster_capacity: u32 = 64;
 
+/// What the froxel grid actually holds after a build.
+///
+/// Per-pixel shading cost in a clustered renderer is (lights in this fragment's
+/// froxel) x (cost per light), and the second term is fixed. So froxel occupancy
+/// IS the performance model: without it, "why is this camera angle slow" can
+/// only be answered by toggling features until something moves.
+pub const Stats = struct {
+    /// Highest occupancy of any froxel. Governs the worst case on screen, and is
+    /// the number to watch when frame time swings with camera angle.
+    max_lights: u32 = 0,
+    /// Mean over OCCUPIED froxels only. Averaging across the whole grid buries
+    /// the interesting figure under a large mostly-empty volume -- most of a
+    /// frustum is empty air, and reporting that as "0.3 lights per froxel" says
+    /// nothing about what the shaded pixels are paying.
+    avg_lights: f32 = 0,
+    /// Froxels holding at least one light.
+    occupied: u32 = 0,
+    /// Froxels filled to capacity. Any further light touching one of these was
+    /// discarded, so fragments there are lit with an incomplete light list --
+    /// visible as lights that vanish at certain angles.
+    saturated: u32 = 0,
+    /// Individual assignments discarded because the froxel was already full.
+    /// Non-zero means the scene has outgrown cluster_capacity somewhere.
+    dropped: u32 = 0,
+    /// Froxels in the grid, for context.
+    total: u32 = 0,
+};
+
 pub const ClusterOptions = struct {
     grid: GridDims = .{},
     capacity: u32 = default_cluster_capacity,
@@ -105,6 +133,9 @@ pub const ClusterBuilder = struct {
     far: f32 = 0,
 
     index_tex_texels: u32 = 0,
+
+    /// Occupancy summary from the last build. Read-only to callers.
+    stats: Stats = .{},
 
     pub fn init(allocator: std.mem.Allocator, opts: ClusterOptions) ClusterBuilder {
         var self = ClusterBuilder{
@@ -222,6 +253,7 @@ pub const ClusterBuilder = struct {
         self.indices.resize(self.allocator, froxel_count * self.capacity) catch return;
         @memset(self.counts.items, 0);
         @memset(self.indices.items, 0);
+        self.stats = .{};
 
         // Fixed slots: froxel i owns indices [i*capacity, (i+1)*capacity).
         for (self.table.items, 0..) |*e, i| {
@@ -233,10 +265,30 @@ pub const ClusterBuilder = struct {
             self.assign(camera);
         }
 
-        // Publish the fill counts.
+        // Publish the fill counts, and summarise them on the same pass -- the
+        // data is already in cache here, so the stats are effectively free.
+        var max_lights: u32 = 0;
+        var occupied: u32 = 0;
+        var saturated: u32 = 0;
+        var sum: u64 = 0;
         for (self.table.items, 0..) |*e, i| {
-            e.*[1] = self.counts.items[i];
+            const c = self.counts.items[i];
+            e.*[1] = c;
+            if (c > 0) {
+                occupied += 1;
+                sum += c;
+                max_lights = @max(max_lights, c);
+                if (c >= self.capacity) saturated += 1;
+            }
         }
+        self.stats.max_lights = max_lights;
+        self.stats.occupied = occupied;
+        self.stats.saturated = saturated;
+        self.stats.total = froxel_count;
+        self.stats.avg_lights = if (occupied > 0)
+            @as(f32, @floatFromInt(sum)) / @as(f32, @floatFromInt(occupied))
+        else
+            0;
 
         self.upload();
     }
@@ -324,7 +376,14 @@ pub const ClusterBuilder = struct {
                     while (tx <= tx_max and tx < @as(i32, @intCast(gx))) : (tx += 1) {
                         const froxel = (sz * gy + @as(u32, @intCast(ty))) * gx + @as(u32, @intCast(tx));
                         const c = self.counts.items[froxel];
-                        if (c >= self.capacity) continue; // full: drop
+                        if (c >= self.capacity) {
+                            // Dropped. Counted rather than silent: a light that
+                            // disappears only from certain angles is otherwise
+                            // one of the harder bugs to recognise, and this
+                            // turns it into a number.
+                            self.stats.dropped += 1;
+                            continue;
+                        }
                         self.indices.items[froxel * self.capacity + c] = @intCast(li);
                         self.counts.items[froxel] = c + 1;
                     }

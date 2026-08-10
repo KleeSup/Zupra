@@ -248,15 +248,26 @@ pub fn render() void {
     fps_frames += 1;
     if (fps_accum >= 0.25) {
         const fps = @as(f32, @floatFromInt(fps_frames)) / fps_accum;
-        const b = scene.bloom.settings;
+        // const b = scene.bloom.settings;
+        // fps_text = std.fmt.bufPrint(
+        //     &fps_buf,
+        //     "{d:.0} FPS {d:.2} ms | bloom {s}  intensity {d:.2}  threshold {d:.2}  mips {d} | lights {s}  [1 bloom  2/3 intensity  5/6 threshold  4 lights  7/8 mips]",
+        //     .{
+        //         fps,                                      1000.0 / fps,
+        //         if (scene.bloom_enabled) "ON" else "OFF", b.intensity,
+        //         b.threshold,                              scene.bloom.mip_count,
+        //         if (lights_on) "on" else "off",
+        //     },
+        // ) catch "FPS ?";
+        const cs = env.lighting.clusterStats();
         fps_text = std.fmt.bufPrint(
             &fps_buf,
-            "{d:.0} FPS {d:.2} ms | bloom {s}  intensity {d:.2}  threshold {d:.2}  mips {d} | lights {s}  [1 bloom  2/3 intensity  5/6 threshold  4 lights  7/8 mips]",
+            "{d:.0} FPS {d:.2} ms | froxels max {d} avg {d:.1} ({d}/{d} used, {d} full, {d} dropped)",
             .{
-                fps,                                      1000.0 / fps,
-                if (scene.bloom_enabled) "ON" else "OFF", b.intensity,
-                b.threshold,                              scene.bloom.mip_count,
-                if (lights_on) "on" else "off",
+                fps,           1000.0 / fps,
+                cs.max_lights, cs.avg_lights,
+                cs.occupied,   cs.total,
+                cs.saturated,  cs.dropped,
             },
         ) catch "FPS ?";
         fps_accum = 0;
