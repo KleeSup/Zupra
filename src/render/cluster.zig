@@ -251,8 +251,12 @@ pub const ClusterBuilder = struct {
         self.counts.resize(self.allocator, froxel_count) catch return;
         self.table.resize(self.allocator, froxel_count) catch return;
         self.indices.resize(self.allocator, froxel_count * self.capacity) catch return;
+        // Only the counts need clearing. The index list is bounded by its
+        // froxel's count on every read, so stale entries beyond that count are
+        // unreachable -- and clearing it means memsetting froxels x capacity
+        // u32s every frame (roughly a megabyte at the default grid), which is
+        // pure memory bandwidth spent to zero data nothing will look at.
         @memset(self.counts.items, 0);
-        @memset(self.indices.items, 0);
         self.stats = .{};
 
         // Fixed slots: froxel i owns indices [i*capacity, (i+1)*capacity).

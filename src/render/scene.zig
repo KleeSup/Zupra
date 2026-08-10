@@ -98,6 +98,9 @@ const OpaqueEntry = struct {
     model: Matrix,
     material: Material,
     bounds: Sphere,
+    /// Squared distance to the camera, for front-to-back ordering. Already
+    /// computed for the transparent sort, so carrying it costs nothing.
+    depth: f32,
 };
 
 /// A submesh deferred mode couldn't put in the G-buffer (custom shader, or a
@@ -421,6 +424,7 @@ pub const SceneRenderer = struct {
                     .model = model_matrix,
                     .material = material,
                     .bounds = bounds,
+                    .depth = depth,
                 }) catch {};
             }
         }
@@ -508,6 +512,24 @@ pub const SceneRenderer = struct {
         // shadow passes below deliberately do not use it.
         self.camera_frustum = Frustum.fromViewProj(self.camera.viewProjection());
         self.submitted_draws = @intCast(self.opaque_queue.items.len + self.transparent.items.len);
+
+        // Opaques front to back. Nearer geometry draws first, fills the depth
+        // buffer early, and everything behind it is rejected before its fragment
+        // shader runs.
+        //
+        // This is what makes the depth prepass worth having. A prepass only
+        // rejects what is ALREADY in the depth buffer, so an unsorted queue
+        // rejects whatever the submission order happened to favour, and a
+        // back-to-front one rejects nothing at all.
+        //
+        // Sorting by material would batch better, but depth wins here: the
+        // pipeline cache already keys on state, and a wasted PBR evaluation
+        // costs far more than a pipeline switch.
+        std.mem.sort(OpaqueEntry, self.opaque_queue.items, {}, struct {
+            fn lessThan(_: void, a: OpaqueEntry, b: OpaqueEntry) bool {
+                return a.depth < b.depth;
+            }
+        }.lessThan);
 
         // 1) Shadow depth passes. Every caster tile is filled before anything
         // samples the atlas, and the queue they draw from is complete by now.
