@@ -327,14 +327,56 @@ pub const ClusterBuilder = struct {
         }
     }
 
+    /// NDC extent of a view-space sphere along one axis, by TANGENT PLANES.
+    ///
+    /// The naive bound -- project centre +/- radius and divide by the frustum
+    /// half-extent at that depth -- treats the sphere as an axis-aligned box and
+    /// is only right when it sits near the view axis. The true silhouette of a
+    /// sphere seen from a point is set by the tangent lines from the eye, and it
+    /// grows as the sphere moves off-axis, without bound as it approaches the
+    /// eye plane. So the naive version UNDERESTIMATES exactly when a light is
+    /// heading off-screen: tiles that genuinely see it are never assigned, and
+    /// the result is a rectangular region of missing light that appears only at
+    /// certain angles.
+    ///
+    /// Working in the 2D plane spanned by this axis and z: rotate the centre
+    /// direction by +/- asin(r/d), where d is the distance to the centre. Those
+    /// two directions are the tangent rays, and each projects to one edge of the
+    /// bound.
+    ///
+    /// Returns null when the eye is INSIDE the sphere, where there is no
+    /// silhouette and the light covers the whole screen.
+    fn sphereAxisNdc(p: f32, z: f32, r: f32, tan_half: f32) ?[2]f32 {
+        const d2 = p * p + z * z;
+        if (d2 <= r * r) return null; // eye inside: everything
+
+        const a = @sqrt(d2 - r * r);
+
+        // (p, z) rotated by +/- theta, with sin(theta) = r/d, cos(theta) = a/d.
+        // The 1/d scale factor cancels in the projection below, so it is omitted.
+        const t1 = tangentNdc(a * p - r * z, r * p + a * z, tan_half);
+        const t2 = tangentNdc(a * p + r * z, -r * p + a * z, tan_half);
+
+        return .{ @min(t1, t2), @max(t1, t2) };
+    }
+
+    /// Project one tangent ray to NDC. A ray at or behind the eye plane has no
+    /// finite projection -- the silhouette runs off that side of the screen --
+    /// so it reports infinity in the direction it was heading, which the caller
+    /// then clamps to the screen edge.
+    fn tangentNdc(tx: f32, tz: f32, tan_half: f32) f32 {
+        if (tz > 1e-5) return (tx / tz) / tan_half;
+        return if (tx >= 0) std.math.inf(f32) else -std.math.inf(f32);
+    }
+
     fn assign(self: *ClusterBuilder, camera: Camera3D) void {
         const gx = self.grid.x;
         const gy = self.grid.y;
         const gz = self.grid.z;
 
-        // Tile extents in view space at z=1, from the projection.
-        const tan_half_fov = @tan(camera.fov_y * 0.5);
-        const aspect = camera.aspect;
+        // Frustum half-extents at z = 1, i.e. tan of each half-angle.
+        const tan_half_y = @tan(camera.fov_y * 0.5);
+        const tan_half_x = tan_half_y * camera.aspect;
 
         for (self.bounds.items, 0..) |b, li| {
             // View-space depth range the sphere spans (LH: +z forward).
@@ -342,37 +384,43 @@ pub const ClusterBuilder = struct {
             const z_max = @min(b.center_vs.z + b.radius, camera.far);
             if (z_max <= camera.near or z_min >= camera.far) continue;
 
+            // Screen bound from the true silhouette. Computed ONCE per light
+            // rather than per depth slice: the tangent bound is the sphere's
+            // outline as seen from the eye and does not depend on which slice is
+            // being considered. That also makes this cheaper than the old
+            // per-slice version it replaces.
+            var x_lo: f32 = -1.0;
+            var x_hi: f32 = 1.0;
+            var y_lo: f32 = -1.0;
+            var y_hi: f32 = 1.0;
+
+            if (sphereAxisNdc(b.center_vs.x, b.center_vs.z, b.radius, tan_half_x)) |xr| {
+                x_lo = std.math.clamp(xr[0], -1.0, 1.0);
+                x_hi = std.math.clamp(xr[1], -1.0, 1.0);
+                if (x_hi < -1.0 or x_lo > 1.0) continue; // fully off-screen
+            }
+            if (sphereAxisNdc(b.center_vs.y, b.center_vs.z, b.radius, tan_half_y)) |yr| {
+                y_lo = std.math.clamp(yr[0], -1.0, 1.0);
+                y_hi = std.math.clamp(yr[1], -1.0, 1.0);
+                if (y_hi < -1.0 or y_lo > 1.0) continue;
+            }
+            // A null from either axis means the eye is inside the sphere on that
+            // axis, and the full [-1, 1] default already covers it.
+
+            const tx_min = @max(ndcToTile(x_lo, gx), 0);
+            const tx_max = ndcToTile(x_hi, gx);
+            const ty_min = @max(ndcToTile(y_lo, gy), 0);
+            const ty_max = ndcToTile(y_hi, gy);
+            if (tx_max < 0 or ty_max < 0) continue;
+
             const slice_min = self.sliceForDepth(z_min);
             const slice_max = self.sliceForDepth(z_max);
 
             var sz = slice_min;
             while (sz <= slice_max and sz < gz) : (sz += 1) {
-                // Use the near plane of this slice for the tightest screen bound
-                // the sphere could occupy within it.
-                const slice_z = @max(self.depthForSlice(sz), camera.near);
-                const eff_z = @max(slice_z, b.center_vs.z - b.radius);
-                if (eff_z <= 0) continue;
-
-                // Project the sphere to a screen-space AABB at this depth.
-                const half_h = tan_half_fov * eff_z;
-                const half_w = half_h * aspect;
-                if (half_w <= 0 or half_h <= 0) continue;
-
-                const x_min_ndc = (b.center_vs.x - b.radius) / half_w;
-                const x_max_ndc = (b.center_vs.x + b.radius) / half_w;
-                const y_min_ndc = (b.center_vs.y - b.radius) / half_h;
-                const y_max_ndc = (b.center_vs.y + b.radius) / half_h;
-
-                // NDC [-1,1] -> tile range.
-                const tx_min = ndcToTile(x_min_ndc, gx);
-                const tx_max = ndcToTile(x_max_ndc, gx);
-                const ty_min = ndcToTile(y_min_ndc, gy);
-                const ty_max = ndcToTile(y_max_ndc, gy);
-                if (tx_max < 0 or ty_max < 0) continue;
-
-                var ty: i32 = @max(ty_min, 0);
+                var ty: i32 = ty_min;
                 while (ty <= ty_max and ty < @as(i32, @intCast(gy))) : (ty += 1) {
-                    var tx: i32 = @max(tx_min, 0);
+                    var tx: i32 = tx_min;
                     while (tx <= tx_max and tx < @as(i32, @intCast(gx))) : (tx += 1) {
                         const froxel = (sz * gy + @as(u32, @intCast(ty))) * gx + @as(u32, @intCast(tx));
                         const c = self.counts.items[froxel];
@@ -399,6 +447,14 @@ pub const ClusterBuilder = struct {
         return @intCast(std.math.clamp(si, 0, @as(i32, @intCast(self.grid.z)) - 1));
     }
 
+    /// Inverse of sliceForDepth: the view depth at a slice's near plane.
+    ///
+    /// Currently unused. The old screen-bound code called it to re-project each
+    /// light per slice; the tangent bound is the sphere's silhouette from the
+    /// eye and does not vary with depth, so it is now computed once per light.
+    /// Kept because it is the exact inverse of sliceForDepth and any future
+    /// per-slice refinement (clipping the sphere to a slice for a tighter bound)
+    /// needs it.
     fn depthForSlice(self: ClusterBuilder, slice: u32) f32 {
         const s: f32 = @floatFromInt(slice);
         return @exp((s - self.slice_bias) / self.slice_scale);

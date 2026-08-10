@@ -36,6 +36,8 @@ const Light = zupra.render.Light;
 const LightHandle = zupra.render.LightHandle;
 const Environment = zupra.render.Environment;
 const Camera2D = zupra.render.Camera2D;
+const Sprite = zupra.graphics.texture.Sprite;
+const TextureRegion = zupra.graphics.texture.TextureRegion;
 
 var gpa: std.mem.Allocator = undefined;
 
@@ -76,6 +78,7 @@ var ball_model: Model = undefined;
 /// One emissive cube model per lantern: emissive is a material factor, so each
 /// colour and strength needs its own material.
 var lamp_models: [lanterns.len]Model = undefined;
+var show_ao_buffer = false;
 
 var lights_on = true;
 
@@ -182,6 +185,7 @@ pub fn render() void {
     if (zupra.input.isKeyJustPressed(._3)) scene.bloom.settings.intensity = @min(1.0, scene.bloom.settings.intensity + 0.02);
     if (zupra.input.isKeyJustPressed(._5)) scene.bloom.settings.threshold = @max(0.0, scene.bloom.settings.threshold - 0.25);
     if (zupra.input.isKeyJustPressed(._6)) scene.bloom.settings.threshold = @min(10.0, scene.bloom.settings.threshold + 0.25);
+    if (zupra.input.isKeyJustPressed(._9)) show_ao_buffer = !show_ao_buffer;
 
     // Emissive geometry lights nothing by itself. Turning the point lights off
     // leaves three glowing cubes floating in a black courtyard, which is exactly
@@ -248,34 +252,44 @@ pub fn render() void {
     fps_frames += 1;
     if (fps_accum >= 0.25) {
         const fps = @as(f32, @floatFromInt(fps_frames)) / fps_accum;
-        // const b = scene.bloom.settings;
-        // fps_text = std.fmt.bufPrint(
-        //     &fps_buf,
-        //     "{d:.0} FPS {d:.2} ms | bloom {s}  intensity {d:.2}  threshold {d:.2}  mips {d} | lights {s}  [1 bloom  2/3 intensity  5/6 threshold  4 lights  7/8 mips]",
-        //     .{
-        //         fps,                                      1000.0 / fps,
-        //         if (scene.bloom_enabled) "ON" else "OFF", b.intensity,
-        //         b.threshold,                              scene.bloom.mip_count,
-        //         if (lights_on) "on" else "off",
-        //     },
-        // ) catch "FPS ?";
-        const cs = env.lighting.clusterStats();
+        const b = scene.bloom.settings;
         fps_text = std.fmt.bufPrint(
             &fps_buf,
-            "{d:.0} FPS {d:.2} ms | froxels max {d} avg {d:.1} ({d}/{d} used, {d} full, {d} dropped)",
+            "{d:.0} FPS {d:.2} ms | bloom {s}  intensity {d:.2}  threshold {d:.2}  mips {d} | lights {s}  [1 bloom  2/3 intensity  5/6 threshold  4 lights  7/8 mips]",
             .{
-                fps,           1000.0 / fps,
-                cs.max_lights, cs.avg_lights,
-                cs.occupied,   cs.total,
-                cs.saturated,  cs.dropped,
+                fps,                                      1000.0 / fps,
+                if (scene.bloom_enabled) "ON" else "OFF", b.intensity,
+                b.threshold,                              scene.bloom.mip_count,
+                if (lights_on) "on" else "off",
             },
         ) catch "FPS ?";
+        // const cs = env.lighting.clusterStats();
+        // fps_text = std.fmt.bufPrint(
+        //     &fps_buf,
+        //     "{d:.0} FPS {d:.2} ms | froxels max {d} avg {d:.1} ({d}/{d} used, {d} full, {d} dropped)",
+        //     .{
+        //         fps,           1000.0 / fps,
+        //         cs.max_lights, cs.avg_lights,
+        //         cs.occupied,   cs.total,
+        //         cs.saturated,  cs.dropped,
+        //     },
+        // ) catch "FPS ?";
         fps_accum = 0;
         fps_frames = 0;
     }
 
     ui_cam.setViewport(sokol.app.widthf(), sokol.app.heightf());
+
     zupra.beginDrawing();
+
+    if (show_ao_buffer) {
+        var ao_sprite = Sprite.init(TextureRegion.full(scene.ssao.debugTexture()));
+        ao_sprite.dest = .{ .x = 0, .y = 0, .width = sokol.app.widthf(), .height = sokol.app.heightf() };
+        batch.begin(ui_cam, .none);
+        batch.draw(ao_sprite);
+        batch.end();
+    }
+
     text.begin(ui_cam);
     text.draw(fps_text, 12, 12, 0.34, zupra.colors.WHITE);
     text.end();
