@@ -185,6 +185,9 @@ pub const DeferredRenderer = struct {
     shadow_sampler: sg.Sampler = .{},
     shadow_params: *const shd_light.ShadowParams = undefined,
 
+    ssao_view: sg.View = .{},
+    ssao_sampler: sg.Sampler = .{},
+
     pub fn init(cache: *PipelineCache) DeferredRenderer {
         const shader = sg.makeShader(shd_light.deferredLightingShaderDesc(sg.queryBackend()));
         const sampler = sg.makeSampler(.{
@@ -229,6 +232,11 @@ pub const DeferredRenderer = struct {
         self.shadow_atlas = atlas;
         self.shadow_sampler = sampler;
         self.shadow_params = params;
+    }
+
+    pub fn setSsao(self: *DeferredRenderer, view: sg.View, sampler: sg.Sampler) void {
+        self.ssao_view = view;
+        self.ssao_sampler = sampler;
     }
 
     pub fn render(
@@ -285,8 +293,12 @@ pub const DeferredRenderer = struct {
             .sampler = shd_light.SMP_smp_data,
         });
 
+        // Shadows.
         bindings.views[shd_light.VIEW_shadow_atlas] = self.shadow_atlas;
         bindings.samplers[shd_light.SMP_smp_shadow] = self.shadow_sampler;
+
+        // SSAO.
+        bindings.views[shd_light.VIEW_tex_ssao] = self.ssao_view;
 
         // Samplers: smp (G-buffer, NEAREST) and smp_cube (IBL, filtering).
         bindings.samplers[shd_light.SMP_smp] = self.sampler;

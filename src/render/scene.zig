@@ -54,6 +54,9 @@ const Skybox = @import("skybox.zig").Skybox;
 const Ibl = @import("ibl.zig").Ibl;
 const PostChain = @import("posprocess.zig").PostChain;
 const AAMethod = @import("posprocess.zig").AAMethod;
+const EnvironmentMap = @import("render.zig").EnvironmentMap;
+const Ssao = @import("render.zig").Ssao;
+const Bloom = @import("render.zig").Bloom;
 
 const ShadowRenderer = @import("shadow_renderer.zig").ShadowRenderer;
 const ShadowParams = @import("shaders").mesh.ShadowParams;
@@ -126,6 +129,11 @@ pub const SceneRenderer = struct {
     ibl: ?Ibl = null,
     ibl_baked: bool = false,
 
+    /// Captured environment. When set it replaces the procedural sky, both as
+    /// the visible background and as the source the IBL chain bakes from.
+    /// SceneRenderer doesn't own it, an environment map is commonly shared between scenes and is expensive to duplicate.
+    envmap: ?*EnvironmentMap = null,
+
     shadows: ShadowRenderer,
     shadow_params: ShadowParams = undefined,
     shadow_queue: std.ArrayList(ShadowSubmission) = .empty,
@@ -145,6 +153,7 @@ pub const SceneRenderer = struct {
     /// most scenes. The deferred path ignores this: its G-buffer pass already
     /// resolves visibility before any lighting runs.
     depth_prepass: bool = true,
+    prepass_fb: Framebuffer = undefined,
 
     /// Depth DRAW CALLS issued by the shadow passes last frame, after culling
     /// and batching, and the number of instances those draws covered. The gap
@@ -152,6 +161,16 @@ pub const SceneRenderer = struct {
     /// queue length times caster count is what culling is buying.
     shadow_draws: u32 = 0,
     shadow_instances: u32 = 0,
+
+    ssao: Ssao = undefined,
+    /// Screen-space occlusion. Deferred only: it needs the G-buffer's normals,
+    /// which the forward path does not produce.
+    ssao_enabled: bool = true,
+
+    bloom: Bloom = undefined,
+    /// HDR bloom. Costs roughly a dozen small fullscreen passes, although the widest
+    /// levels run on tiny images, so the total is far less than it looks.
+    bloom_enabled: bool = true,
 
     /// Submeshes submitted vs. those that survived camera culling last frame.
     submitted_draws: u32 = 0,
@@ -201,13 +220,22 @@ pub const SceneRenderer = struct {
         // opaque, and both modes use it to forward-shade transparents.
         self.forward = MeshRenderer.init(cache);
         self.prepass = DepthPrepass.init(cache);
+        self.ssao = Ssao.init(cache, width, height, .{});
         if (mode == .deferred) {
             self.gbuffer = GBuffer.init(width, height);
             self.geo = GeometryRenderer.init(cache);
             self.lit = DeferredRenderer.init(cache);
+        } else if (mode == .forward) {
+            self.prepass_fb = Framebuffer.init(.{
+                .width = width,
+                .height = height,
+                .color_format = .RGBA16F,
+                .depth_format = .DEPTH,
+            });
         }
         self.skybox = Skybox.init(cache);
         self.ibl = Ibl.init(allocator, cache);
+        self.bloom = Bloom.init(cache, width, height, .{});
         return self;
     }
 
@@ -220,7 +248,10 @@ pub const SceneRenderer = struct {
             self.lit.deinit();
             self.gbuffer.deinit();
             self.geo.deinit();
+        } else if (self.mode == .forward) {
+            self.prepass_fb.deinit();
         }
+        self.ssao.deinit();
         self.forward.deinit();
         self.prepass.deinit();
         self.post.deinit();
@@ -229,6 +260,7 @@ pub const SceneRenderer = struct {
         if (self.ibl) |*ibl| ibl.deinit();
         self.shadows.deinit();
         self.shadow_queue.deinit(self.allocator);
+        self.bloom.deinit();
     }
 
     pub fn setRenderScale(self: *SceneRenderer, scale: u8) void {
@@ -241,6 +273,14 @@ pub const SceneRenderer = struct {
         if (samples == self.msaa_samples) return;
         self.msaa_samples = @max(1, samples);
         self.width = 0; // force ensureSize to recreate the target next frame
+    }
+
+    /// Swap the environment. Clears ibl_baked so irradiance and the specular
+    /// prefilter are rebuilt from the new source on the next frame -> leaving the
+    /// old bake in place would light the scene from an environment no longer visible behind it.
+    pub fn setEnvironmentMap(self: *SceneRenderer, map: ?*EnvironmentMap) void {
+        self.envmap = map;
+        self.ibl_baked = false;
     }
 
     fn makeSceneColor(self: *SceneRenderer, mode: ShadingMode, w: u32, h: u32) Framebuffer {
@@ -266,8 +306,18 @@ pub const SceneRenderer = struct {
         if (self.mode == .deferred) {
             self.gbuffer.deinit();
             self.gbuffer = GBuffer.init(rw, rh);
+        } else if (self.mode == .forward) {
+            self.prepass_fb.deinit();
+            self.prepass_fb = Framebuffer.init(.{
+                .width = rw,
+                .height = rh,
+                .color_format = .RGBA16F,
+                .depth_format = .DEPTH,
+            });
         }
         self.post.resize(rw, rh);
+        self.ssao.resize(rw, rh);
+        self.bloom.resize(rw, rh);
         self.width = rw;
         self.height = rh;
     }
@@ -309,7 +359,7 @@ pub const SceneRenderer = struct {
         if (!self.ibl_baked) {
             if (self.ibl) |*ibl| {
                 if (self.skybox) |*sky| {
-                    ibl.bake(sky);
+                    ibl.bake(sky, self.envmap);
                     self.ibl_baked = true;
                 }
             }
@@ -335,13 +385,15 @@ pub const SceneRenderer = struct {
         // camera culling. The shadow queue is deliberately NOT camera-culled:
         // an object behind the camera can still cast a shadow into view, so it
         // is tested against each LIGHT's frustum instead, never this one.
-        for (inst.model.meshes) |submesh| {
-            self.shadow_queue.append(self.allocator, .{
-                .mesh = submesh,
-                .model = model_matrix,
-                .bounds = submesh.bounds.transform(model_matrix),
-                .key = submesh.vbuf.id,
-            }) catch {};
+        if (inst.cast_shadows) {
+            for (inst.model.meshes) |submesh| {
+                self.shadow_queue.append(self.allocator, .{
+                    .mesh = submesh,
+                    .model = model_matrix,
+                    .bounds = submesh.bounds.transform(model_matrix),
+                    .key = submesh.vbuf.id,
+                }) catch {};
+            }
         }
 
         const dx = self.camera.position.x - inst.position.x;
@@ -399,6 +451,7 @@ pub const SceneRenderer = struct {
         frustum: Frustum,
         bias: f32,
         slope: f32,
+        cull: sg.CullMode,
         sig: PassSignature,
     ) void {
         const items = self.shadow_queue.items;
@@ -413,7 +466,6 @@ pub const SceneRenderer = struct {
                 if (!frustum.intersectsSphere(items[j].bounds)) continue;
                 self.instance_scratch.append(self.allocator, items[j].model) catch {};
             }
-
             if (self.instance_scratch.items.len > 0) {
                 self.shadow_draws += 1;
                 self.shadow_instances += @intCast(self.instance_scratch.items.len);
@@ -423,6 +475,7 @@ pub const SceneRenderer = struct {
                     view_proj,
                     bias,
                     slope,
+                    cull,
                     sig,
                 );
             }
@@ -485,22 +538,55 @@ pub const SceneRenderer = struct {
                 self.geo.begin(self.camera, self.gbuffer.passSignature());
             },
             .forward => {
-                zupra.beginDrawingFramebufferClear(self.scene_color, self.clear_color);
-
-                // Depth prepass, inside the same pass so the depth buffer stays
-                // live between the two. Colour writes are masked off, so this
-                // only populates depth and the clear above is untouched.
+                // Prepass first, into its own target: depth for early-z, normals
+                // for AO. Both are sampled before the colour pass begins.
                 if (self.depth_prepass) {
-                    self.prepass.begin(self.camera, self.scene_color.passSignature());
+                    zupra.beginDrawingFramebufferClear(self.prepass_fb, .{ .r = 0, .g = 0, .b = 0, .a = 0 });
+                    self.prepass.begin(self.camera, self.prepass_fb.passSignature());
                     for (self.opaque_queue.items) |e| {
                         if (!self.visible(e.bounds)) continue;
                         self.prepass.draw(e.mesh, e.model, e.material);
                     }
                     self.prepass.end();
+                    zupra.endDrawing();
+
+                    if (self.ssao_enabled) {
+                        self.ssao.render(
+                            self.camera,
+                            self.prepass_fb.depth_sample,
+                            self.prepass_fb.sample_view,
+                        );
+                        self.forward.setSsao(self.ssao.aoView());
+                    } else {
+                        self.forward.setSsao(zupra.intern.white_1x1.view);
+                    }
+                } else {
+                    // No prepass, no normals, no AO. White is the identity for
+                    // the multiply in the shader.
+                    self.forward.setSsao(zupra.intern.white_1x1.view);
+                    zupra.beginDrawingFramebufferClear(self.scene_color, self.clear_color);
+                    self.forward.beginEx(self.camera, self.env, self.scene_color.passSignature());
                 }
                 self.forward.depth_prepass = self.depth_prepass;
 
-                self.forward.beginEx(self.camera, self.env, self.scene_color.passSignature());
+                // Colour pass. When the prepass ran, attach ITS depth and load
+                // it; clearing would discard the buffer the pass exists to test
+                // against. Without a prepass, fall back to the target's own.
+                if (self.depth_prepass) {
+                    zupra.beginDrawingFramebufferLoadDepth(
+                        self.scene_color,
+                        self.clear_color,
+                        self.prepass_fb.depth_view,
+                    );
+                    self.forward.beginEx(
+                        self.camera,
+                        self.env,
+                        self.scene_color.passSignatureWith(self.prepass_fb.depth_format),
+                    );
+                } else {
+                    zupra.beginDrawingFramebufferClear(self.scene_color, self.clear_color);
+                    self.forward.beginEx(self.camera, self.env, self.scene_color.passSignature());
+                }
             },
         }
         for (self.opaque_queue.items) |e| {
@@ -514,6 +600,14 @@ pub const SceneRenderer = struct {
             .deferred => {
                 self.geo.end();
                 zupra.endDrawing(); // end G-buffer pass
+
+                if (self.ssao_enabled) {
+                    self.ssao.render(self.camera, self.gbuffer.depthTexture().view, self.gbuffer.normalTexture().view);
+                    self.lit.setSsao(self.ssao.aoView(), self.ssao.aoSampler());
+                    self.forward.setSsao(self.ssao.aoView()); // FIXME: Should SSAO even be bound for transparents??
+                } else {
+                    self.lit.setSsao(zupra.intern.white_1x1.view, self.ssao.aoSampler());
+                }
 
                 // PBR opaque -> scene-color via the lighting pass.
                 zupra.beginDrawingFramebufferClear(self.scene_color, self.clear_color);
@@ -538,7 +632,9 @@ pub const SceneRenderer = struct {
             .deferred => self.gbuffer.depthTexture(),
             .forward => null, // forward depth isn't sampleable yet
         };
-        self.post.present(self.scene_color.asTexture(), depth);
+        var hdr = self.scene_color.asTexture();
+        if (self.bloom_enabled) hdr = self.bloom.render(hdr);
+        self.post.present(hdr, depth);
     }
 
     fn composite(self: *SceneRenderer) void {
@@ -566,8 +662,11 @@ pub const SceneRenderer = struct {
         }));
         const sig = self.scene_color.passSignatureWith(.DEPTH);
 
-        // Sky first (fills background; geometry occludes it via depth test).
-        if (self.skybox) |*sky| sky.render(self.camera, sig);
+        if (self.envmap) |em| {
+            em.render(self.camera, sig);
+        } else if (self.skybox) |*s| {
+            s.render(self.camera, sig);
+        }
 
         // Then sorted transparents over everything.
         if (has_transparent) {
@@ -591,7 +690,15 @@ pub const SceneRenderer = struct {
     fn opaqueDepthView(self: SceneRenderer) sg.View {
         return switch (self.mode) {
             .deferred => self.gbuffer.depth_view,
-            .forward => self.scene_color.depth_view,
+            // Forward: with a prepass, opaque depth lives in the prepass target
+            // and scene_color's own depth is never written -- the colour pass
+            // attaches the prepass buffer rather than clearing its own. The sky
+            // and transparents must test against the same buffer the opaques
+            // actually filled.
+            .forward => if (self.depth_prepass)
+                self.prepass_fb.depth_view
+            else
+                self.scene_color.depth_view,
         };
     }
 

@@ -58,6 +58,8 @@ pub const ShadowCaster = struct {
     /// Depth bias applied in the depth-only pass (slope-scaled, in the pipeline).
     depth_bias: f32 = 2.0,
     depth_bias_slope: f32 = 3.0,
+    /// Face culling for this caster's depth pass. See ShadowSettings.caster_cull.
+    cull: sg.CullMode = .NONE,
     /// This view's frustum, for rejecting casters that cannot affect its tile.
     /// Derived from view_proj rather than stored per light type, so a cascade's
     /// orthographic box, a spot's cone and a cube face all cull through exactly
@@ -116,7 +118,28 @@ pub const ShadowSettings = struct {
     /// The atlas allocates this many tiles for the light.
     cascade_count: u32 = 1,
     /// PCF filter radius in texels. 0 = hard (1 tap), 1 = 3x3, 2 = 5x5.
+    ///
+    /// Cost is (2r+1)^2 dependent atlas fetches PER SHADOWED LIGHT touching the
+    /// fragment, so this is the sharpest dial available when shadowed lights
+    /// overlap: three lights at radius 1 is 27 fetches a pixel.
     pcf_radius: u32 = 1,
+    /// Face culling for the depth pass. Neither option is right for every scene,
+    /// which is why it is a setting rather than a constant:
+    ///
+    ///   .FRONT records the far side of each occluder, which pushes the recorded
+    ///     surface away from the receiver and suppresses acne on curved
+    ///     geometry. But where an object MEETS its receiver -- a post standing
+    ///     on a floor -- the far surface is the object's underside, coplanar
+    ///     with the floor, and any bias then leaks a bright outline around the
+    ///     contact.
+    ///   .NONE records the nearest surface, so contact is correct and the
+    ///     outline disappears, at the cost of more self-shadowing acne that the
+    ///     bias settings then have to absorb.
+    ///   .BACK is rarely useful here; it is the shading-pass convention.
+    ///
+    /// .NONE is the default because a wrong-looking contact edge reads as a bug
+    /// to everyone, while mild acne reads as texture.
+    caster_cull: sg.CullMode = .NONE,
     /// How far behind the fitted volume the near plane is pulled back, in world
     /// units, so geometry BETWEEN the light and the visible slice still gets
     /// into the map. Without it a tall object just outside the cascade is

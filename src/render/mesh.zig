@@ -187,6 +187,7 @@ pub const MeshRenderer = struct {
     ibl_sampler: sg.Sampler = .{},
 
     shadow_atlas: sg.View = .{},
+    ssao_map: sg.View = .{},
     shadow_sampler: sg.Sampler = .{},
     shadow_params: *const shd.ShadowParams = undefined,
 
@@ -217,6 +218,17 @@ pub const MeshRenderer = struct {
         self.ibl_prefilter = prefilter;
         self.ibl_brdf_lut = brdf_lut;
         self.ibl_sampler = sampler;
+    }
+
+    /// Screen-space occlusion for the forward path, produced by the depth+normal
+    /// prepass. Pass a 1x1 white view when SSAO is off: sokol requires every
+    /// declared binding to be filled, and white makes the shader's multiply a
+    /// no-op without needing a second shader variant.
+    ///
+    /// Whether a given draw actually READS this is decided per draw, not here --
+    /// see the note in drawMesh.
+    pub fn setSsao(self: *MeshRenderer, view: sg.View) void {
+        self.ssao_map = view;
     }
 
     pub fn setShadows(self: *MeshRenderer, atlas: sg.View, sampler: sg.Sampler, params: *const shd.ShadowParams) void {
@@ -346,6 +358,23 @@ pub const MeshRenderer = struct {
                     bindings.views[shd.VIEW_emissive_map] = material.map(.emissive).view;
                     bindings.views[shd.VIEW_metallic_roughness_map] = material.map(.metallic_roughness).view;
                     bindings.views[shd.VIEW_occlusion_map] = material.map(.occlusion).view;
+                    // AO is only valid for geometry that CONTRIBUTED to the
+                    // depth+normal buffer it was computed from. Everything else
+                    // -- transparents, alpha-masked, unlit, custom-shader, and
+                    // every draw this renderer makes in deferred mode -- is
+                    // absent from that buffer, so the value at its pixels
+                    // describes whatever opaque surface lies BEHIND it. A glass
+                    // pane in front of a dark corner would wear the corner's
+                    // occlusion. White is the identity for the multiply.
+                    //
+                    // Same predicate as the depth-write decision above, and for
+                    // the same reason: both are asking "was this drawn into the
+                    // prepass?", and they must not be able to disagree.
+                    const ssao_valid = self.depth_prepass and depthPrepassEligible(material);
+                    bindings.views[shd.VIEW_ssao_map] = if (ssao_valid)
+                        self.ssao_map
+                    else
+                        zupra.intern.white_1x1.view;
                     bindings.samplers[shd.SMP_smp_material] = mat_smp;
 
                     bindings.views[shd.VIEW_shadow_atlas] = self.shadow_atlas;

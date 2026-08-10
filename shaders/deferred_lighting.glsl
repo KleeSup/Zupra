@@ -52,6 +52,7 @@ layout(binding=7) uniform texture2D brdf_lut;
 layout(binding=8) uniform texture2D light_data;
 layout(binding=9) uniform utexture2D cluster_table;
 layout(binding=10) uniform utexture2D cluster_indices;
+layout(binding=12) uniform texture2D tex_ssao;
 layout(binding=0) uniform sampler smp;
 layout(binding=1) uniform sampler smp_cube;
 @sampler_type smp_data nonfiltering
@@ -114,6 +115,14 @@ void main() {
 
     vec3 albedo = texture(sampler2D(tex_albedo, smp), v_uv).rgb;
     vec3 mat = texture(sampler2D(tex_material, smp), v_uv).rgb;
+
+    // Screen-space occlusion folds into the material's own AO channel rather
+    // than being applied to the final colour. pbrShade uses it on the AMBIENT
+    // term only, which is the correct place: occlusion describes how much of the
+    // sky a point can see, and says nothing about whether an analytic light
+    // reaches it -- that is what the shadow maps are for. Multiplying the whole
+    // result would double-darken anything already in shadow.
+    mat.b *= texture(sampler2D(tex_ssao, smp), v_uv).r;
     vec3 N = normalize(nrm.xyz);
     vec3 V = normalize(camera_pos.xyz - world_pos);
 

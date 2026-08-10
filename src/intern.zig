@@ -7,15 +7,18 @@ pub const ttf = @cImport({
 });
 
 const graphics = @import("graphics/graphics.zig");
+const zupra = @import("root.zig");
 // --- Internals ---
-pub const gpa = @import("std").heap.c_allocator;
 
 pub var pipeline_cache: graphics.pipeline.PipelineCache = undefined;
+pub var white_1x1: graphics.texture.Texture = undefined;
 
 var initialized = false;
 pub fn init() *const fn () void {
     if (initialized) @panic("zupra.intern.init() called! This should never be invoked from outside the framework!");
-    pipeline_cache = .init(gpa);
+    pipeline_cache = graphics.pipeline.PipelineCache.init(zupra.getGPA());
+    const a: [4]u8 = .{ 255, 255, 255, 255 };
+    white_1x1 = graphics.texture.Texture.initRaw(&a, 1, 1);
 
     initialized = true;
     return deinit;
@@ -23,4 +26,5 @@ pub fn init() *const fn () void {
 
 fn deinit() void {
     pipeline_cache.deinit();
+    white_1x1.deinit();
 }

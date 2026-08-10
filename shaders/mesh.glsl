@@ -74,6 +74,9 @@ layout(binding=4) uniform texture2D base_color_map;
 layout(binding=5) uniform texture2D emissive_map;
 layout(binding=6) uniform texture2D metallic_roughness_map;
 layout(binding=7) uniform texture2D occlusion_map;
+// Screen-space occlusion from the depth+normal prepass. Bound to a 1x1 white
+// texture when SSAO is off, so the binding stays valid without a shader variant.
+layout(binding=12) uniform texture2D ssao_map;
 layout(binding=8) uniform texture2D light_data;
 layout(binding=9) uniform utexture2D cluster_table;
 layout(binding=10) uniform utexture2D cluster_indices;
@@ -157,6 +160,21 @@ void main() {
 
     float ao_tex = texture(sampler2D(occlusion_map, smp_material), uv_ao).r;
     float ao = mix(1.0, ao_tex, material.z);
+
+    // Fold in screen-space occlusion, multiplying the material's own AO rather
+    // than the final colour. pbrShade applies this to the AMBIENT term only,
+    // which is the correct place: occlusion says how much of the sky a point can
+    // see, not whether an analytic light reaches it -- that is what the shadow
+    // maps answer. Scaling the whole result would double-darken anything already
+    // in shadow.
+    //
+    // A forward fragment has no screen UV, so derive one from gl_FragCoord.
+    // cluster_grid.zw already carries the render dimensions for the froxel
+    // lookup. No y-flip: gl_FragCoord's origin and a render target's first texel
+    // row run the same way on every backend, which is why this needs no
+    // equivalent of the froxel code's origin_top_left correction.
+    vec2 ao_uv = gl_FragCoord.xy / max(cluster_grid.zw, vec2(1.0));
+    ao *= texture(sampler2D(ssao_map, smp_material), ao_uv).r;
 
     vec3 color = pbrShade(v_world_pos, N, V, albedo, metallic, roughness, ao, v_view_depth);
 

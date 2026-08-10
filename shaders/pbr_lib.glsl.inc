@@ -449,6 +449,14 @@ vec3 pbrShade(vec3 world_pos, vec3 N, vec3 V, vec3 albedo,
         vec3 L;
         float att;
         punctualLightAt(idx, world_pos, L, att);
+        // Reject before sampling the shadow map. A froxel holds every light
+        // whose volume touches it, so plenty of them contribute nothing to any
+        // given fragment -- and each shadowFactor call is a full PCF kernel of
+        // dependent atlas fetches, which is the most expensive thing in this
+        // loop. Skipping a light that is out of range or behind the surface
+        // costs two comparisons and saves nine texture reads.
+        if (att <= 1e-4 || dot(N, L) <= 0.0) continue;
+
         vec3 radiance = punctualLightRadiance(idx) * att;
         float sh = shadowFactor(punctualShadowIndex(idx), world_pos, N, view_depth);
         Lo += shadeOneLight(N, V, L, radiance, albedo, metallic, roughness, F0) * sh;
@@ -498,8 +506,13 @@ vec3 diffuseShade(vec3 world_pos, vec3 N, float view_depth) {
         vec3 L;
         float att;
         punctualLightAt(idx, world_pos, L, att);
+        // Same rejection as the PBR loop: no point paying for a shadow lookup
+        // for a light that contributes nothing.
+        float ndl = dot(N, L);
+        if (att <= 1e-4 || ndl <= 0.0) continue;
+
         float sh = shadowFactor(punctualShadowIndex(idx), world_pos, N, view_depth);
-        diffuse += punctualLightRadiance(idx) * att * max(dot(N, L), 0.0) * sh;
+        diffuse += punctualLightRadiance(idx) * att * ndl * sh;
     }
     return diffuse;
 }

@@ -107,10 +107,10 @@ pub const DepthPrepass = struct {
             .primitive = .TRIANGLES,
             .cull = material.cullMode(),
             .blend = .none,
-            // Depth only: the pass has a colour attachment (the shading pass
-            // needs one), so the pipeline keeps color_count at 1 and masks the
-            // writes off instead of declaring itself depth-only.
-            .color_write_mask = .NONE,
+            // Colour writes ON: this pass owns its own target now and emits the
+            // world normal into it. It used to run inside the shading pass with
+            // writes masked off, which worked only while it produced nothing.
+            .color_write_mask = .RGBA,
             .depth_test = true,
             .depth_write = true,
             .face_winding = .CCW,

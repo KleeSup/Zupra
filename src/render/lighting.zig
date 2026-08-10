@@ -96,6 +96,10 @@ pub const LightingFrame = struct {
         return self.store.count();
     }
 
+    pub fn clusterStats(self: LightingFrame) cluster_mod.Stats {
+        return self.cluster.stats;
+    }
+
     /// Coarser grids for weaker hardware; finer grids reduce per-froxel light
     /// counts in dense scenes.
     pub fn reconfigureClusters(self: *LightingFrame, opts: ClusterOptions) void {

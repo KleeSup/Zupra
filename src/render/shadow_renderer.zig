@@ -248,6 +248,7 @@ pub const ShadowRenderer = struct {
                 .tile_size = tile.size,
                 .depth_bias = s.depth_bias,
                 .depth_bias_slope = s.slope_bias,
+                .cull = s.caster_cull,
                 .frustum = Frustum.fromViewProj(fit.view_proj),
             }) catch {};
         }
@@ -335,6 +336,7 @@ pub const ShadowRenderer = struct {
             .tile_size = tile.size,
             .depth_bias = s.depth_bias,
             .depth_bias_slope = s.slope_bias,
+            .cull = s.caster_cull,
             .frustum = Frustum.fromViewProj(view_proj),
         }) catch {};
 
@@ -432,6 +434,7 @@ pub const ShadowRenderer = struct {
                 .tile_size = tile.size,
                 .depth_bias = s.depth_bias,
                 .depth_bias_slope = s.slope_bias,
+                .cull = s.caster_cull,
                 .frustum = Frustum.fromViewProj(view_proj),
             }) catch {};
         }
@@ -491,7 +494,7 @@ pub const ShadowRenderer = struct {
                 origin_top_left,
             );
             // The scene draws its shadow casters through us for this view_proj.
-            scene.drawShadowCasters(self, caster.view_proj, caster.frustum, caster.depth_bias, caster.depth_bias_slope, sig);
+            scene.drawShadowCasters(self, caster.view_proj, caster.frustum, caster.depth_bias, caster.depth_bias_slope, caster.cull, sig);
             zupra.endDrawing();
         }
     }
@@ -499,7 +502,7 @@ pub const ShadowRenderer = struct {
     /// Draw one mesh into the current caster's depth tile. Called by the scene's
     /// drawShadowCasters callback for each casting instance. Position-only — no
     /// material, no fragment work beyond depth.
-    pub fn drawMesh(self: *ShadowRenderer, mesh: Mesh, model: Matrix, view_proj: Matrix, depth_bias: f32, slope_bias: f32, sig: PassSignature) void {
+    pub fn drawMesh(self: *ShadowRenderer, mesh: Mesh, model: Matrix, view_proj: Matrix, depth_bias: f32, slope_bias: f32, cull: sg.CullMode, sig: PassSignature) void {
         var key = PipelineKey{
             .shader = self.shader,
             .layout = .mesh, // reuse mesh layout; only pos is consumed
@@ -507,7 +510,7 @@ pub const ShadowRenderer = struct {
             .indexed = true,
             .pass = sig,
             .primitive = .TRIANGLES,
-            .cull = .FRONT, // front-face cull reduces peter-panning / acne
+            .cull = cull, // see ShadowSettings.caster_cull
             .blend = .none,
             .depth_test = true,
             .depth_write = true,
@@ -551,6 +554,7 @@ pub const ShadowRenderer = struct {
         view_proj: Matrix,
         depth_bias: f32,
         slope_bias: f32,
+        cull: sg.CullMode,
         sig: PassSignature,
     ) void {
         if (models.len == 0) return;
@@ -562,7 +566,7 @@ pub const ShadowRenderer = struct {
             .indexed = true,
             .pass = sig,
             .primitive = .TRIANGLES,
-            .cull = .FRONT,
+            .cull = cull, // see ShadowSettings.caster_cull
             .blend = .none,
             .depth_test = true,
             .depth_write = true,

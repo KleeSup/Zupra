@@ -77,6 +77,22 @@ pub const ModelInstance = struct {
     rotation: Quaternion = .{ 0, 0, 0, 1 }, // identity quaternion
     scale: Vec3 = .{ .x = 1, .y = 1, .z = 1 },
 
+    /// Whether this instance is submitted to the shadow passes.
+    ///
+    /// Turning it off can be helpful for correcting wrong light projections. An example
+    /// case would be light-fixture geometry, where a lamp mesh surrounding its own
+    /// point light occludes that light in every direction, so the fixture's
+    /// entire range goes black. Emissive signs, glowing crystals and any prop
+    /// that reads as a source have the same problem.
+    ///
+    /// It also covers geometry whose shadow is wrong rather than absent
+    /// (i.e. billboards, fake volumetrics, cards standing in for foliage) and thin
+    /// clutter whose shadow nobody would miss.
+    ///
+    /// The instance still renders normally, still receives shadows, and still
+    /// appears in the depth prepass. Only shadow SUBMISSION is skipped.
+    cast_shadows: bool = true,
+
     pub fn init(model: *const Model) ModelInstance {
         return .{ .model = model };
     }
@@ -95,6 +111,10 @@ pub const ModelInstance = struct {
 
     pub fn setScale(self: *ModelInstance, s: Vec3) void {
         self.scale = s;
+    }
+
+    pub fn setCastShadows(self: *ModelInstance, enabled: bool) void {
+        self.cast_shadows = enabled;
     }
 
     /// Object -> world. Scale, then rotate, then translate (row-vector order:
