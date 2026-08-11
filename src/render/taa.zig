@@ -50,7 +50,7 @@ const TaaParams = extern struct {
     inv_view_proj: [16]f32,
     prev_view_proj: [16]f32,
     params: [4]f32, // 1/w, 1/h, blend weight, origin_top_left
-    flags: [4]f32, // reset, unused x3
+    flags: [4]f32, // reset, variance gamma, unused x2
 };
 
 pub const Settings = struct {
@@ -65,6 +65,19 @@ pub const Settings = struct {
     /// Scales the sub-pixel offset. Below 1 gives a tighter, sharper result that
     /// resolves less; above 1 softens. Rarely worth moving.
     jitter_scale: f32 = 1.0,
+    /// How many standard deviations of the local neighbourhood the history may
+    /// stray before it is clipped back.
+    ///
+    /// This is the ghosting/stability dial. Lower rejects history sooner, which
+    /// kills trails behind moving objects but discards good history too and
+    /// leaves more aliasing and noise. Higher accumulates longer and looks
+    /// cleaner standing still, at the cost of ghosting in motion. 1.0 to 1.5 is
+    /// the usual range.
+    ///
+    /// Note this is a TIGHTER test than a plain min/max neighbourhood box, which
+    /// one outlier can stretch wide open. Coming from such a box, expect to want
+    /// a value above 1.5 to accumulate as much history as before.
+    variance_gamma: f32 = 1.75,
 };
 
 pub const Taa = struct {
@@ -211,7 +224,12 @@ pub const Taa = struct {
                 std.math.clamp(self.settings.blend, 0.01, 1.0),
                 if (sg.queryFeatures().origin_top_left) 1.0 else 0.0,
             },
-            .flags = .{ if (self.reset) 1.0 else 0.0, 0, 0, 0 },
+            .flags = .{
+                if (self.reset) 1.0 else 0.0,
+                self.settings.variance_gamma,
+                0,
+                0,
+            },
         };
 
         zupra.beginDrawingFramebufferClear(dst, .{ .r = 0, .g = 0, .b = 0, .a = 1 });

@@ -3,29 +3,41 @@
 //
 //  Temporal anti-aliasing resolve.
 //
-//  THE IDEA. Each frame is rendered with the projection nudged by a fraction of
-//  a pixel, so consecutive frames sample the scene at different points inside
-//  each pixel. Accumulating them recovers detail no single frame contains --
-//  which is why TAA both anti-aliases geometry AND cleans up stochastic effects
-//  like GTAO, whose per-pixel noise averages out across the sequence. That
-//  second property is the reason it comes before GTAO rather than after.
+//  Each frame renders with the projection nudged by a fraction of a pixel, so
+//  consecutive frames sample different points inside every pixel. Accumulating
+//  them recovers detail no single frame contains -- which is why TAA both
+//  anti-aliases geometry AND averages out per-pixel noise in stochastic effects
+//  like GTAO.
 //
-//  REPROJECTION. Last frame's pixel is somewhere else this frame, so the history
-//  is looked up at where this surface WAS. Position is reconstructed from depth
-//  and pushed through the previous view-projection. This is exact for static
-//  geometry and for any camera motion; an object that moved on its own is not
-//  accounted for, and relies on the clamp below.
+//  Three things decide whether this looks like anti-aliasing or like smeared
+//  mud, and all three are here:
 //
-//  NEIGHBOURHOOD CLAMPING is what makes it usable rather than a smear. History
-//  is only trusted where it agrees with what is actually on screen now: it is
-//  clamped into the colour range of the current pixel's 3x3 neighbourhood, so
-//  when a surface is newly revealed, or an object moved without a velocity to
-//  follow, the stale colour is pulled to something plausible instead of ghosting.
+//  1. REPROJECTION. Last frame's pixel is elsewhere this frame, so the history
+//     is read from where this surface WAS: reconstruct position from depth, push
+//     it through the previous view-projection. Exact for static geometry under
+//     any camera motion. Objects moving under their own transform are not
+//     tracked and rely on (2).
 //
-//  TONEMAP-WEIGHTED BLENDING. Averaging HDR values directly lets one very bright
-//  sample dominate the mean and flicker for several frames afterwards. Weighting
-//  each contribution by 1/(1+luma) during the blend and undoing it afterwards
-//  averages in a perceptual space instead, which is the standard fix.
+//  2. VARIANCE CLIPPING, in YCoCg. History is only trusted where it agrees with
+//     what is on screen now. Rather than a min/max box of the 3x3 neighbourhood
+//     -- which one outlier pixel can stretch until it accepts almost anything --
+//     this builds the neighbourhood's mean and standard deviation and clips to
+//     mean +/- gamma*sigma. Tighter, so it catches ghosting the box misses, and
+//     more stable, because it moves smoothly with the neighbourhood instead of
+//     jumping when the extreme pixel changes. YCoCg because clipping in RGB
+//     drags hue as well as brightness, producing coloured fringes on edges.
+//
+//     CLIPPING, not clamping: the history is moved ALONG THE LINE toward the
+//     neighbourhood mean until it enters the box, which preserves its direction
+//     in colour space. Per-channel clamping bends the colour toward a box corner
+//     and shifts hue.
+//
+//  3. CATMULL-ROM HISTORY SAMPLING. The reprojected position almost never lands
+//     on a texel centre, so the history is resampled every single frame. With
+//     bilinear that is a low-pass filter applied hundreds of times over, and it
+//     is the entire reason TAA has a reputation for softening the image. A
+//     sharpening bicubic kernel very nearly cancels the loss, which is why this
+//     costs five taps instead of one.
 //------------------------------------------------------------------------------
 
 @vs vs
@@ -51,7 +63,7 @@ layout(binding=0) uniform taa_params {
     // xy = 1 / target size, z = blend weight for the current frame,
     // w = 1 when the render target reads top-left first.
     vec4 params;
-    // x = 1 to reset history (first frame, or after a resize/teleport).
+    // x = 1 to reset history, y = variance clipping gamma, zw unused.
     vec4 flags;
 };
 
@@ -68,12 +80,109 @@ float luma(vec3 c) {
     return dot(c, vec3(0.2126, 0.7152, 0.0722));
 }
 
-// Weight bright samples down before averaging, and undo it after.
+// Weight bright samples down before averaging and undo it after, so one very
+// bright sample cannot dominate the running mean and flicker for frames.
 vec3 tonemapWeight(vec3 c) {
     return c / (1.0 + luma(c));
 }
 vec3 tonemapUnweight(vec3 c) {
     return c / max(1.0 - luma(c), 1e-4);
+}
+
+// YCoCg separates luminance from two chroma axes, so a clip bounded per channel
+// bounds brightness and hue independently instead of mixing them.
+vec3 rgbToYcocg(vec3 c) {
+    return vec3(
+        0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
+        0.5 * c.r - 0.5 * c.b,
+        -0.25 * c.r + 0.5 * c.g - 0.25 * c.b
+    );
+}
+vec3 ycocgToRgb(vec3 c) {
+    float t = c.x - c.z;
+    return vec3(t + c.y, c.x + c.z, t - c.y);
+}
+
+// Move `history` along the line toward `center` until it lies inside the box.
+// Preserves its direction in colour space; a per-channel clamp would not.
+vec3 clipToBox(vec3 box_min, vec3 box_max, vec3 history) {
+    vec3 center = 0.5 * (box_max + box_min);
+    vec3 extent = 0.5 * (box_max - box_min) + 1e-5;
+    vec3 v = history - center;
+    vec3 units = abs(v / extent);
+    float worst = max(units.x, max(units.y, units.z));
+    return (worst > 1.0) ? center + v / worst : history;
+}
+
+vec3 historyTap(vec2 uv) {
+    return textureLod(sampler2D(tex_history, smp), uv, 0.0).rgb;
+}
+
+// Five-tap Catmull-Rom. The full kernel is 4x4; collapsing each axis' middle
+// pair into one bilinear fetch at a weighted position, and dropping the corner
+// groups, brings it to five while keeping the sharpening the centre provides.
+vec3 sampleHistoryCatmullRom(vec2 uv, vec2 texel) {
+    vec2 size = 1.0 / texel;
+    vec2 sample_pos = uv * size;
+    vec2 tex1 = floor(sample_pos - 0.5) + 0.5;
+    vec2 f = sample_pos - tex1;
+
+    vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    vec2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    vec2 w3 = f * f * (-0.5 + 0.5 * f);
+
+    vec2 w12 = w1 + w2;
+    vec2 off12 = w2 / w12;
+
+    vec2 pos0 = (tex1 - 1.0) * texel;
+    vec2 pos3 = (tex1 + 2.0) * texel;
+    vec2 pos12 = (tex1 + off12) * texel;
+
+    vec3 result = vec3(0.0);
+    float total = 0.0;
+
+    // Track the range of the taps as well as their weighted sum. Catmull-Rom
+    // sharpens by giving the outer taps NEGATIVE weight, which means the result
+    // can land outside the values it was built from -- overshooting above the
+    // brightest tap and undershooting below the darkest.
+    //
+    // Beside a very bright surface that undershoot is what draws a dark rim.
+    // Pre-tonemap the contrast is extreme (an emissive can be 40.0 against a
+    // background near 0.1), so the ring is severe rather than subtle, and
+    // clamping to zero does not help: the rim is not negative, just far below
+    // its neighbours.
+    //
+    // Bounding the result by its own taps removes the ringing completely while
+    // keeping the sharpening everywhere the kernel stays in range -- which is
+    // everywhere except these high-contrast edges.
+    vec3 tap_min = vec3(1e30);
+    vec3 tap_max = vec3(-1e30);
+    vec3 t;
+    float k;
+
+    k = w12.x * w0.y;
+    t = historyTap(vec2(pos12.x, pos0.y));
+    result += t * k; total += k; tap_min = min(tap_min, t); tap_max = max(tap_max, t);
+
+    k = w0.x * w12.y;
+    t = historyTap(vec2(pos0.x, pos12.y));
+    result += t * k; total += k; tap_min = min(tap_min, t); tap_max = max(tap_max, t);
+
+    k = w12.x * w12.y;
+    t = historyTap(vec2(pos12.x, pos12.y));
+    result += t * k; total += k; tap_min = min(tap_min, t); tap_max = max(tap_max, t);
+
+    k = w3.x * w12.y;
+    t = historyTap(vec2(pos3.x, pos12.y));
+    result += t * k; total += k; tap_min = min(tap_min, t); tap_max = max(tap_max, t);
+
+    k = w12.x * w3.y;
+    t = historyTap(vec2(pos12.x, pos3.y));
+    result += t * k; total += k; tap_min = min(tap_min, t); tap_max = max(tap_max, t);
+
+    // Renormalise: dropping the corner groups leaves the weights short of 1.
+    return clamp(result / total, tap_min, tap_max);
 }
 
 void main() {
@@ -86,18 +195,25 @@ void main() {
 
     vec2 texel = params.xy;
     bool flip = params.w > 0.5;
+    float gamma = max(flags.y, 0.1);
 
-    // Colour extent of the 3x3 neighbourhood, used to bound the history below.
-    vec3 nmin = current;
-    vec3 nmax = current;
+    // First and second moments of the 3x3 neighbourhood, in YCoCg. Mean and
+    // standard deviation from these describe the neighbourhood far better than
+    // its extremes do.
+    vec3 m1 = vec3(0.0);
+    vec3 m2 = vec3(0.0);
     for (int y = -1; y <= 1; y++) {
         for (int x = -1; x <= 1; x++) {
-            if (x == 0 && y == 0) continue;
-            vec3 c = textureLod(sampler2D(tex_color, smp), v_uv + vec2(x, y) * texel, 0.0).rgb;
-            nmin = min(nmin, c);
-            nmax = max(nmax, c);
+            vec3 c = rgbToYcocg(textureLod(sampler2D(tex_color, smp), v_uv + vec2(x, y) * texel, 0.0).rgb);
+            m1 += c;
+            m2 += c * c;
         }
     }
+    const float inv_n = 1.0 / 9.0;
+    vec3 mu = m1 * inv_n;
+    vec3 sigma = sqrt(max(m2 * inv_n - mu * mu, vec3(0.0)));
+    vec3 box_min = mu - gamma * sigma;
+    vec3 box_max = mu + gamma * sigma;
 
     // Where was this surface last frame?
     float raw_depth = textureLod(sampler2D(tex_depth, smp), v_uv, 0.0).r;
@@ -106,34 +222,23 @@ void main() {
 
     vec4 prev_clip = prev_view_proj * vec4(world, 1.0);
     if (prev_clip.w <= 0.0) {
-        // Behind last frame's eye: no history to reproject from.
-        frag_color = vec4(current, 1.0);
+        frag_color = vec4(current, 1.0); // behind last frame's eye
         return;
     }
-    vec2 prev_ndc = prev_clip.xy / prev_clip.w;
-    vec2 prev_uv = prev_ndc * 0.5 + 0.5;
+    vec2 prev_uv = (prev_clip.xy / prev_clip.w) * 0.5 + 0.5;
     if (flip) prev_uv.y = 1.0 - prev_uv.y;
 
-    // Off-screen last frame: this surface is newly visible and has no history.
     if (prev_uv.x < 0.0 || prev_uv.x > 1.0 || prev_uv.y < 0.0 || prev_uv.y > 1.0) {
-        frag_color = vec4(current, 1.0);
+        frag_color = vec4(current, 1.0); // newly on screen: no history
         return;
     }
 
-    vec3 history = textureLod(sampler2D(tex_history, smp), prev_uv, 0.0).rgb;
+    vec3 history = sampleHistoryCatmullRom(prev_uv, texel);
+    history = ycocgToRgb(clipToBox(box_min, box_max, rgbToYcocg(history)));
 
-    // Trust history only as far as it agrees with what is on screen now.
-    // Disocclusions and unaccounted object motion both land outside this box,
-    // and clamping converts what would be a lingering ghost into at most a few
-    // frames of slightly stale colour.
-    history = clamp(history, nmin, nmax);
-
-    // Blend in tonemapped space so one bright sample cannot dominate the mean.
     vec3 a = tonemapWeight(current);
     vec3 b = tonemapWeight(history);
-    vec3 result = tonemapUnweight(mix(b, a, params.z));
-
-    frag_color = vec4(result, 1.0);
+    frag_color = vec4(tonemapUnweight(mix(b, a, params.z)), 1.0);
 }
 @end
 
