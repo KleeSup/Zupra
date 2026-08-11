@@ -171,12 +171,11 @@ pub const SceneRenderer = struct {
     /// which the forward path does not produce.
     ssao_enabled: bool = true,
 
-    taa: Taa = undefined,
     /// Temporal anti-aliasing. Accumulates sub-pixel-jittered frames, which
     /// resolves edges far beyond what FXAA reaches and averages out per-pixel
     /// noise in stochastic effects. Costs one full-screen pass and two RGBA16F
     /// history targets.
-    taa_enabled: bool = true,
+    taa: Taa = undefined,
 
     bloom: Bloom = undefined,
     /// HDR bloom. Costs roughly a dozen small fullscreen passes, although the widest
@@ -337,7 +336,12 @@ pub const SceneRenderer = struct {
     }
 
     pub fn setAAMethod(self: *SceneRenderer, method: AAMethod) void {
+        if (self.post.aa == .taa and method != .taa) self.taa.resetHistory();
         self.post.aa = method;
+    }
+
+    pub fn isTaaActive(self: *SceneRenderer) bool {
+        return self.post.aa == .taa;
     }
 
     pub fn begin(self: *SceneRenderer, camera: Camera3D, env: *Environment) void {
@@ -347,12 +351,7 @@ pub const SceneRenderer = struct {
 
         self.camera = camera;
         self.camera.setViewport(@floatFromInt(w), @floatFromInt(h));
-        if (self.taa_enabled) {
-            const j = self.taa.jitter();
-            self.camera.jitter = j;
-        } else {
-            self.camera.jitter = .{ 0, 0 };
-        }
+        self.camera.jitter = if (self.isTaaActive()) self.taa.jitter() else .{ 0, 0 };
         self.env = env;
         self.transparent.clearRetainingCapacity();
         self.forward_opaque.clearRetainingCapacity();
@@ -590,6 +589,7 @@ pub const SceneRenderer = struct {
                     zupra.endDrawing();
 
                     if (self.ssao_enabled) {
+                        self.ssao.settings.temporal_jitter = self.isTaaActive();
                         self.ssao.render(
                             self.camera,
                             self.prepass_fb.depth_sample,
@@ -641,6 +641,7 @@ pub const SceneRenderer = struct {
                 zupra.endDrawing(); // end G-buffer pass
 
                 if (self.ssao_enabled) {
+                    self.ssao.settings.temporal_jitter = self.isTaaActive();
                     self.ssao.render(self.camera, self.gbuffer.depthTexture().view, self.gbuffer.normalTexture().view);
                     self.lit.setSsao(self.ssao.aoView(), self.ssao.aoSampler());
                     self.forward.setSsao(self.ssao.aoView()); // FIXME: Should SSAO even be bound for transparents??
@@ -669,12 +670,15 @@ pub const SceneRenderer = struct {
         // Present: tonemap scene-color (HDR) onto the swapchain.
         const depth: ?zupra.graphics.texture.Texture = switch (self.mode) {
             .deferred => self.gbuffer.depthTexture(),
-            .forward => null, // forward depth isn't sampleable yet
+            .forward => self.prepass_fb.asTexture(),
         };
         var hdr = self.scene_color.asTexture();
-        if (self.taa_enabled) {
-            // UNJITTERED matrix: see the note in taa.zig.
-            hdr = self.taa.resolve(hdr, self.opaqueDepthSampleView(), self.camera.unjitteredViewProjection());
+        if (self.isTaaActive()) {
+            hdr = self.taa.resolve(
+                hdr,
+                self.opaqueDepthSampleView(),
+                self.camera.unjitteredViewProjection(),
+            );
         }
         if (self.bloom_enabled) hdr = self.bloom.render(hdr);
         self.post.present(hdr, depth);

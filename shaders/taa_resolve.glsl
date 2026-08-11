@@ -63,7 +63,8 @@ layout(binding=0) uniform taa_params {
     // xy = 1 / target size, z = blend weight for the current frame,
     // w = 1 when the render target reads top-left first.
     vec4 params;
-    // x = 1 to reset history, y = variance clipping gamma, zw unused.
+    // x = 1 to reset history, y = variance clipping gamma,
+    // z = history sharpening 0..1, w unused.
     vec4 flags;
 };
 
@@ -233,7 +234,24 @@ void main() {
         return;
     }
 
-    vec3 history = sampleHistoryCatmullRom(prev_uv, texel);
+    // Blend between a plain bilinear fetch and the sharpening bicubic.
+    //
+    // SHARPENING HERE IS A FEEDBACK LOOP: the sharpened result becomes next
+    // frame's history, is sharpened again, and so on. Each pass is legal within
+    // its own taps, but the overshoot compounds, and after enough frames it
+    // shows as a bright rim hugging every silhouette that sits against a darker
+    // background -- the halo around a sphere or a post, and the lighter edge
+    // along a wall.
+    //
+    // At full strength the loop wins. At zero, the repeated bilinear resampling
+    // softens the image, which is the problem the bicubic was added to solve.
+    // Partial strength recovers most of the sharpness while keeping the
+    // accumulated overshoot below where it becomes visible.
+    float sharpen = clamp(flags.z, 0.0, 1.0);
+    vec3 history_bilinear = historyTap(prev_uv);
+    vec3 history = (sharpen > 0.001)
+        ? mix(history_bilinear, sampleHistoryCatmullRom(prev_uv, texel), sharpen)
+        : history_bilinear;
     history = ycocgToRgb(clipToBox(box_min, box_max, rgbToYcocg(history)));
 
     vec3 a = tonemapWeight(current);

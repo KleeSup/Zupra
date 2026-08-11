@@ -112,10 +112,8 @@ pub const AAMethod = enum {
     none,
     fxaa, // cheap console variant: 9 taps, no edge search
     fxaa_quality, // FXAA 3.11: searches the edge span, keeps texture detail
+    taa,
     // smaa,      // needs precomputed area/search LUTs
-    // taa,       // needs velocity buffer + history + camera jitter; would run
-    //            // at .hdr, before tonemap — the injection points already
-    //            // express that, so it slots in without restructuring.
 };
 
 pub const PostChain = struct {
@@ -342,7 +340,7 @@ pub const PostChain = struct {
         // --- Anti-aliasing (always last: it wants the finished image) ---
         zupra.beginDrawingClear(self.clear_color);
         switch (self.aa) {
-            .none => {},
+            .none, .taa => {},
             .fxaa => self.fxaa(ldr_src, PassSignature.swapchainPass()),
             .fxaa_quality => self.fxaaQuality(ldr_src, PassSignature.swapchainPass()),
         }

@@ -18,10 +18,15 @@
 //! reconstructing normals from depth derivatives, which is a separate piece of
 //! work and noticeably worse at silhouettes.
 //!
+//! The estimator is GTAO (see ssao.glsl): it finds exact horizon angles per
+//! slice and solves the visibility integral across them in closed form, rather
+//! than scattering sample points and counting hits. Same passes, same targets,
+//! same consumers -- only the shader changed.
+//!
 //! Two passes: occlusion, then a depth-aware blur. The blur is not optional --
-//! the occlusion pass deliberately trades banding for noise by rotating its
-//! sample directions per pixel, and that trade only pays off if something
-//! averages the noise back out.
+//! the occlusion pass deliberately trades banding for noise by jittering both
+//! slice angle and march offset per pixel, and that trade only pays off if
+//! something averages the noise back out.
 
 const std = @import("std");
 const sg = @import("sokol").gfx;
@@ -46,8 +51,11 @@ const Matrix = math.Matrix;
 const SsaoParams = extern struct {
     view: [16]f32,
     proj_xy: [4]f32, // m00, m11, 1/m00, 1/m11
-    depth_lin: [4]f32, // A, B, origin_top_left, sample count
-    params: [4]f32, // radius, intensity, bias, falloff
+    depth_lin: [4]f32, // A, B, origin_top_left, unused
+    params: [4]f32, // radius, intensity, thickness, falloff power
+    bias: [4]f32, // angle bias (radians), unused x3
+    counts: [4]f32, // slices, steps, target width, target height
+    temporal: [4]f32, // rotation, offset, jitter enabled, unused
 };
 
 const BlurParams = extern struct {
@@ -56,23 +64,65 @@ const BlurParams = extern struct {
 };
 
 pub const Settings = struct {
-    /// Sampling radius in WORLD units. This is the scale of the detail AO can
-    /// resolve: it is the size of the crevice you want darkened, not a quality
-    /// dial. Too large and everything picks up a soft grey wash with no
-    /// contact detail; too small and only the tightest corners register.
-    radius: f32 = 0.6,
+    /// Sampling radius in WORLD units: the size of the crevice you want
+    /// darkened, not a quality dial. Too large and everything takes on a soft
+    /// grey wash with no contact detail; too small and only the tightest
+    /// corners register.
+    ///
+    /// The shader converts this to pixels and clamps the result to a usable
+    /// range, so a distant surface still gets a real search width instead of a
+    /// sub-pixel march that can never find a horizon -- which is what made a
+    /// world-space-only radius silently produce an empty buffer at distance.
+    radius: f32 = 1.0,
     /// Strength of the darkening. Above ~1.5 the result stops reading as
     /// occlusion and starts reading as dirt.
     intensity: f32 = 1.0,
-    /// Depth bias in world units, against self-occlusion on flat surfaces where
-    /// samples land within depth precision of the surface they came from.
-    bias: f32 = 0.02,
-    /// Samples per pixel, capped at 32 by the shader loop. 16 is the usual
-    /// sweet spot; the cost is close to linear in this.
-    samples: u32 = 16,
+    /// Vary the probe directions per frame so a temporal filter can converge
+    /// them. Set this from whether TAA is actually running.
+    ///
+    /// ON WITHOUT TAA IT LOOKS WORSE, not better: the AO pattern changes every
+    /// frame with nothing averaging it, so the image shimmers. With TAA it is
+    /// the whole point -- successive frames probe different directions and the
+    /// accumulation resolves detail no single frame contains, which is why
+    /// shipping GTAO runs so few slices.
+    temporal_jitter: bool = false,
+    /// Slices through the hemisphere. Each is solved analytically, so this is
+    /// the axis along which GTAO converges: 2 is usable, 3 is the common
+    /// shipping choice, and beyond 4 the gain is hard to see.
+    ///
+    /// With temporal_jitter and TAA, 2 is generally enough -- the temporal
+    /// accumulation supplies what the missing slices would have.
+    ///
+    /// No `bias` any more. Hemisphere sampling needed one because samples landed
+    /// within depth precision of their own surface; horizon search compares
+    /// angles rather than depths and has no equivalent failure.
+    slices: u32 = 3,
+    /// March steps per direction, so each slice costs 2x this many taps. The
+    /// radius is divided across them, so more steps means finer occluders are
+    /// found rather than a longer reach.
+    steps: u32 = 4,
+    /// Horizons within this many RADIANS of the tangent plane are ignored.
+    ///
+    /// Not a fudge factor -- it removes a specific statistical bias. Depth
+    /// reconstruction scatters samples slightly either side of a flat surface,
+    /// the horizon search takes max() over them, and the maximum of N noisy
+    /// values drifts upward with N. Without this, a flat floor darkens in
+    /// proportion to STEP COUNT.
+    ///
+    /// A real occluder rises well clear of the tangent, so a few degrees costs
+    /// almost nothing in creases. Raise it if flat surfaces still darken as
+    /// steps increase; lower it if shallow contact shadows disappear.
+    /// 0.1 rad is about 6 degrees.
+    angle_bias: f32 = 0.1,
+    /// How aggressively a distant sample is discounted. A sample far behind the
+    /// surface is usually a different object seen past an edge rather than a
+    /// nearby wall, and counting it fully is what makes horizon methods draw
+    /// dark halos around silhouettes. Raise it if you see them; lower it if
+    /// occlusion feels too weak in deep corners.
+    thickness: f32 = 1.0,
     /// Exponent on the final term. Above 1 deepens contact shadows while
     /// leaving open areas alone; 1.0 is linear.
-    falloff: f32 = 1.5,
+    falloff: f32 = 1.0,
     /// Blur kernel radius in taps per axis (max 8). The blur is separable, so
     /// cost is linear in this, not quadratic.
     blur_radius: u32 = 3,
@@ -111,6 +161,8 @@ pub const Ssao = struct {
     blurred: Framebuffer,
 
     settings: Settings = .{},
+    /// Ticks once per render, driving the temporal jitter sequence.
+    frame: u32 = 0,
     width: u32 = 0,
     height: u32 = 0,
 
@@ -198,23 +250,37 @@ pub const Ssao = struct {
         // Pass 1: occlusion.
         zupra.beginDrawingFramebuffer(self.ao);
         {
+            const jitter = temporalJitter(self.frame);
+
             var params = SsaoParams{
                 .view = @bitCast(camera.view()),
                 .proj_xy = .{ m00, m11, 1.0 / m00, 1.0 / m11 },
                 .depth_lin = .{
                     a,
                     b,
-                    // Same flag the shadow sampler uses: where render targets
-                    // read top-left first, screen UVs and NDC y run opposite
-                    // ways, and this pass converts between them per sample.
                     if (sg.queryFeatures().origin_top_left) 1.0 else 0.0,
-                    @floatFromInt(@max(1, self.settings.samples)),
+                    0,
                 },
                 .params = .{
                     self.settings.radius,
                     self.settings.intensity,
-                    self.settings.bias,
+                    self.settings.thickness,
                     self.settings.falloff,
+                },
+                .bias = .{ self.settings.angle_bias, 0, 0, 0 },
+
+                .temporal = .{
+                    jitter.rotation,
+                    jitter.offset,
+                    if (self.settings.temporal_jitter) 1.0 else 0.0,
+                    0,
+                },
+
+                .counts = .{
+                    @floatFromInt(@max(1, self.settings.slices)),
+                    @floatFromInt(@max(1, self.settings.steps)),
+                    @floatFromInt(self.width),
+                    @floatFromInt(self.height),
                 },
             };
 
@@ -235,6 +301,10 @@ pub const Ssao = struct {
             sg.draw(0, 3, 1);
         }
         zupra.endDrawing();
+
+        // The jitter sequences are 6 and 4 long, so 12 covers both without the
+        // counter ever growing large enough to lose precision as a float.
+        self.frame +%= 1;
 
         // Passes 2 and 3: separable blur. Horizontal ao -> blurred, then
         // vertical blurred -> ao, so the finished result lands back in `ao` and
@@ -330,4 +400,30 @@ fn makeTarget(w: u32, h: u32) Framebuffer {
 fn scaled(width: u32, height: u32, s: Settings) struct { w: u32, h: u32 } {
     const div: u32 = if (s.half_resolution) 2 else 1;
     return .{ .w = @max(1, width / div), .h = @max(1, height / div) };
+}
+
+fn temporalJitter(frame: u32) struct { rotation: f32, offset: f32 } {
+    const i6_ = frame % 6;
+    const i4_ = frame % 4;
+
+    const rotations = [_]f32{
+        1.0 / 6.0,
+        5.0 / 6.0,
+        3.0 / 6.0,
+        4.0 / 6.0,
+        2.0 / 6.0,
+        0.0,
+    };
+
+    const offsets = [_]f32{
+        0.0,
+        0.5,
+        0.25,
+        0.75,
+    };
+
+    return .{
+        .rotation = rotations[i6_],
+        .offset = offsets[i4_],
+    };
 }

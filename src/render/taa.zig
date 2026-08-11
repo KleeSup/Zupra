@@ -50,7 +50,7 @@ const TaaParams = extern struct {
     inv_view_proj: [16]f32,
     prev_view_proj: [16]f32,
     params: [4]f32, // 1/w, 1/h, blend weight, origin_top_left
-    flags: [4]f32, // reset, variance gamma, unused x2
+    flags: [4]f32, // reset, variance gamma, history sharpening, unused
 };
 
 pub const Settings = struct {
@@ -78,6 +78,20 @@ pub const Settings = struct {
     /// one outlier can stretch wide open. Coming from such a box, expect to want
     /// a value above 1.5 to accumulate as much history as before.
     variance_gamma: f32 = 1.75,
+    /// How much of the sharpening bicubic to use when resampling the history,
+    /// 0 = plain bilinear, 1 = full Catmull-Rom.
+    ///
+    /// The reprojected position rarely lands on a texel centre, so the history
+    /// is resampled EVERY frame. Bilinear there is a low-pass filter applied
+    /// hundreds of times over, which is why TAA is known for softening an image.
+    /// A sharpening kernel cancels most of that.
+    ///
+    /// But it is a feedback loop -- the sharpened result becomes next frame's
+    /// input -- so at full strength the overshoot compounds and draws bright rims
+    /// along silhouettes against darker backgrounds. Partial strength keeps most
+    /// of the sharpness with the accumulation staying below visibility. Raise it
+    /// if the image feels soft; lower it if edges start to glow.
+    history_sharpening: f32 = 0.4,
 };
 
 pub const Taa = struct {
@@ -227,7 +241,7 @@ pub const Taa = struct {
             .flags = .{
                 if (self.reset) 1.0 else 0.0,
                 self.settings.variance_gamma,
-                0,
+                self.settings.history_sharpening,
                 0,
             },
         };
