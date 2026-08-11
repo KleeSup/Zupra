@@ -48,6 +48,11 @@ pub fn build(b: *Build) !void {
         },
     });
 
+    const debug_views = b.option(bool, "debug-views", "Compile in debug visualisations (AO buffer, cluster heatmap, etc.)") orelse (optimize == .Debug);
+    const build_opts = b.addOptions();
+    build_opts.addOption(bool, "debug_views", debug_views);
+    root_mod.addOptions("build_options", build_opts);
+
     var compile_step: *std.Build.Step.Compile = undefined;
 
     const example_mod = b.createModule(.{

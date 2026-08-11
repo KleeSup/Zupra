@@ -94,8 +94,8 @@ pub fn main(ctx: std.process.Init) !void {
 pub fn init() void {
     gpa = zupra.getGPA();
     cache = .init(gpa);
-    scene = zupra.render.SceneRenderer.init(gpa, &cache, .deferred, 1280, 720);
-    scene.setAAMethod(.fxaa);
+    scene = zupra.render.SceneRenderer.init(gpa, &cache, .forward, 1280, 720);
+    //scene.setAAMethod(.fxaa);
 
     cam = zupra.render.Camera3D.init(16.0 / 9.0);
     controller = .init(.{ .x = 0, .y = 3.0, .z = -14 });
@@ -185,7 +185,11 @@ pub fn render() void {
     if (zupra.input.isKeyJustPressed(._3)) scene.bloom.settings.intensity = @min(1.0, scene.bloom.settings.intensity + 0.02);
     if (zupra.input.isKeyJustPressed(._5)) scene.bloom.settings.threshold = @max(0.0, scene.bloom.settings.threshold - 0.25);
     if (zupra.input.isKeyJustPressed(._6)) scene.bloom.settings.threshold = @min(10.0, scene.bloom.settings.threshold + 0.25);
+    if (zupra.input.isKeyJustPressed(._7)) scene.taa_enabled = !scene.taa_enabled;
     if (zupra.input.isKeyJustPressed(._9)) show_ao_buffer = !show_ao_buffer;
+    if (zupra.input.isKeyJustPressed(.P)) {
+        controller.position.x += 5;
+    }
 
     // Emissive geometry lights nothing by itself. Turning the point lights off
     // leaves three glowing cubes floating in a black courtyard, which is exactly
@@ -266,12 +270,13 @@ pub fn render() void {
         const cs = env.lighting.clusterStats();
         fps_text = std.fmt.bufPrint(
             &fps_buf,
-            "{d:.0} FPS {d:.2} ms | froxels max {d} avg {d:.1} ({d}/{d} used, {d} full, {d} dropped)",
+            "{d:.0} FPS {d:.2} ms | froxels max {d} avg {d:.1} ({d}/{d} used, {d} full, {d} dropped) | Bloom={s} | TAA={s}",
             .{
-                fps,           1000.0 / fps,
-                cs.max_lights, cs.avg_lights,
-                cs.occupied,   cs.total,
-                cs.saturated,  cs.dropped,
+                fps,                                          1000.0 / fps,
+                cs.max_lights,                                cs.avg_lights,
+                cs.occupied,                                  cs.total,
+                cs.saturated,                                 cs.dropped,
+                if (scene.bloom_enabled) "true" else "false", if (scene.taa_enabled) "true" else "false",
             },
         ) catch "FPS ?";
         fps_accum = 0;

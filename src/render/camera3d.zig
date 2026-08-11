@@ -24,6 +24,14 @@ pub const Camera3D = struct {
     near: f32 = 0.1,
     far: f32 = 1000.0,
 
+    /// Sub-pixel projection offset in NDC, for temporal anti-aliasing.
+    /// This value should be zero until TAA is enabled in a used SceneRenderer.
+    ///
+    /// Idea: It gets applied to the projection and must shift where the
+    /// scene lands on the pixel grid without changing where the camera is (or
+    /// reprojection would have to undo it again).
+    jitter: [2]f32 = .{ 0, 0 },
+
     pub fn init(aspect: f32) Camera3D {
         return .{ .aspect = aspect };
     }
@@ -49,7 +57,21 @@ pub const Camera3D = struct {
 
     /// View->clip. [0,1] depth, matches sokol.
     pub fn projection(self: Camera3D) Matrix {
-        return zm.perspectiveFovLh(self.fov_y, self.aspect, self.near, self.far);
+        var p = zm.perspectiveFovLh(self.fov_y, self.aspect, self.near, self.far);
+        // w == view z here, so a z-proportional offset becomes a constant NDC shift after the divide.
+        p[2][0] += self.jitter[0];
+        p[2][1] += self.jitter[1];
+        return p;
+    }
+
+    /// The projection without the jitter. The jitter is
+    /// a rendering offset, not part of where a surface actually is, and feeding
+    /// the jittered matrix to TAA makes the history chase the jitter sequence
+    /// instead of the camera (which is why it needs Reprojection).
+    pub fn unjitteredViewProjection(self: Camera3D) Matrix {
+        var c = self;
+        c.jitter = .{ 0, 0 };
+        return zm.mul(c.view(), c.projection());
     }
 
     /// The matrix the mesh shader's view_proj uniform wants. Upload directly.

@@ -5,6 +5,7 @@ pub const zmath = @import("zmath");
 pub const ttf = @cImport({
     @cInclude("stb_truetype.h");
 });
+pub const debug_views = @import("build_options").debug_views;
 
 const graphics = @import("graphics/graphics.zig");
 const zupra = @import("root.zig");

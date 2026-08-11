@@ -13,7 +13,11 @@ pub const TextBatch2D = @import("font.zig").TextBatch2D;
 pub const Framebuffer = @import("framebuffer.zig").Framebuffer;
 pub const FramebufferOptions = @import("framebuffer.zig").FramebufferOptions;
 pub const PostChain = @import("posprocess.zig").PostChain;
+
 pub const AAMethod = @import("posprocess.zig").AAMethod;
+pub const Taa = @import("taa.zig").Taa;
+pub const TaaSettings = @import("taa.zig").Settings;
+
 pub const PostEffect = @import("posprocess.zig").PostEffect;
 pub const InjectionPoint = @import("posprocess.zig").InjectionPoint;
 

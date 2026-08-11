@@ -57,6 +57,7 @@ const AAMethod = @import("posprocess.zig").AAMethod;
 const EnvironmentMap = @import("render.zig").EnvironmentMap;
 const Ssao = @import("render.zig").Ssao;
 const Bloom = @import("render.zig").Bloom;
+const Taa = @import("taa.zig").Taa;
 
 const ShadowRenderer = @import("shadow_renderer.zig").ShadowRenderer;
 const ShadowParams = @import("shaders").mesh.ShadowParams;
@@ -170,6 +171,13 @@ pub const SceneRenderer = struct {
     /// which the forward path does not produce.
     ssao_enabled: bool = true,
 
+    taa: Taa = undefined,
+    /// Temporal anti-aliasing. Accumulates sub-pixel-jittered frames, which
+    /// resolves edges far beyond what FXAA reaches and averages out per-pixel
+    /// noise in stochastic effects. Costs one full-screen pass and two RGBA16F
+    /// history targets.
+    taa_enabled: bool = true,
+
     bloom: Bloom = undefined,
     /// HDR bloom. Costs roughly a dozen small fullscreen passes, although the widest
     /// levels run on tiny images, so the total is far less than it looks.
@@ -239,6 +247,7 @@ pub const SceneRenderer = struct {
         self.skybox = Skybox.init(cache);
         self.ibl = Ibl.init(allocator, cache);
         self.bloom = Bloom.init(cache, width, height, .{});
+        self.taa = Taa.init(cache, width, height, .{});
         return self;
     }
 
@@ -264,6 +273,7 @@ pub const SceneRenderer = struct {
         self.shadows.deinit();
         self.shadow_queue.deinit(self.allocator);
         self.bloom.deinit();
+        self.taa.deinit();
     }
 
     pub fn setRenderScale(self: *SceneRenderer, scale: u8) void {
@@ -321,6 +331,7 @@ pub const SceneRenderer = struct {
         self.post.resize(rw, rh);
         self.ssao.resize(rw, rh);
         self.bloom.resize(rw, rh);
+        self.taa.resize(rw, rh);
         self.width = rw;
         self.height = rh;
     }
@@ -336,6 +347,12 @@ pub const SceneRenderer = struct {
 
         self.camera = camera;
         self.camera.setViewport(@floatFromInt(w), @floatFromInt(h));
+        if (self.taa_enabled) {
+            const j = self.taa.jitter();
+            self.camera.jitter = j;
+        } else {
+            self.camera.jitter = .{ 0, 0 };
+        }
         self.env = env;
         self.transparent.clearRetainingCapacity();
         self.forward_opaque.clearRetainingCapacity();
@@ -655,6 +672,10 @@ pub const SceneRenderer = struct {
             .forward => null, // forward depth isn't sampleable yet
         };
         var hdr = self.scene_color.asTexture();
+        if (self.taa_enabled) {
+            // UNJITTERED matrix: see the note in taa.zig.
+            hdr = self.taa.resolve(hdr, self.opaqueDepthSampleView(), self.camera.unjitteredViewProjection());
+        }
         if (self.bloom_enabled) hdr = self.bloom.render(hdr);
         self.post.present(hdr, depth);
     }
@@ -721,6 +742,17 @@ pub const SceneRenderer = struct {
                 self.prepass_fb.depth_view
             else
                 self.scene_color.depth_view,
+        };
+    }
+
+    /// The same depth buffer as opaqueDepthView, but as a texture view.
+    fn opaqueDepthSampleView(self: SceneRenderer) sg.View {
+        return switch (self.mode) {
+            .deferred => self.gbuffer.depthTexture().view,
+            .forward => if (self.depth_prepass)
+                self.prepass_fb.depth_sample
+            else
+                self.scene_color.depth_sample,
         };
     }
 
