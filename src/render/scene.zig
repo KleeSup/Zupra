@@ -670,7 +670,7 @@ pub const SceneRenderer = struct {
         // Present: tonemap scene-color (HDR) onto the swapchain.
         const depth: ?zupra.graphics.texture.Texture = switch (self.mode) {
             .deferred => self.gbuffer.depthTexture(),
-            .forward => self.prepass_fb.asTexture(),
+            .forward => if (self.depth_prepass) self.prepass_fb.asTexture() else null,
         };
         var hdr = self.scene_color.asTexture();
         if (self.isTaaActive()) {
