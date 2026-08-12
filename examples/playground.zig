@@ -323,14 +323,21 @@ pub fn render() void {
     if (fps_accum >= 0.25) {
         const fps = @as(f32, @floatFromInt(fps_frames)) / fps_accum;
         const ws = world.stats;
+        const cached_pct: f32 = if (scene.shadow_instances > 0)
+            100.0 * @as(f32, @floatFromInt(scene.shadow_static_instances)) /
+                @as(f32, @floatFromInt(scene.shadow_instances))
+        else
+            0;
         fps_text = std.fmt.bufPrint(
             &fps_buf,
-            "{d:.0} FPS {d:.2}ms | TAA {s} | objects {d}/{d} visible, {d} moved | {s}{s}  [1 taa 2 pause 3 velocity 4 slow 5 bloom 6 ao]",
+            "{d:.0} FPS {d:.2}ms | TAA {s} | objects {d}/{d} visible, {d} moved | {s}{s}  [1 taa 2 pause 3 velocity 4 slow 5 bloom 6 ao]\nshadow: {d} draws, {d} instances, {d:.0}% cacheable",
             .{
                 fps,                                      1000.0 / fps,
                 if (scene.isTaaActive()) "on" else "off", ws.visible,
                 ws.total,                                 ws.moved,
                 if (paused) "paused " else "",            if (slow) "slow" else "",
+                scene.shadow_draws,                       scene.shadow_instances,
+                cached_pct,
             },
         ) catch "FPS ?";
         fps_accum = 0;

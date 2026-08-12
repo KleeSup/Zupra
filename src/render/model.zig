@@ -93,6 +93,8 @@ pub const ModelInstance = struct {
     /// appears in the depth prepass. Only shadow SUBMISSION is skipped.
     cast_shadows: bool = true,
 
+    shadow_cacheable: bool = false,
+
     pub fn init(model: *const Model) ModelInstance {
         return .{ .model = model };
     }

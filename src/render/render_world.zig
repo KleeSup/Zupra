@@ -63,7 +63,7 @@ pub const Handle = struct {
 
 /// How an object is expected to move. This is a promise the caller makes, and
 /// the optimisations that depend on it are only correct if it holds.
-pub const Mobility = enum {
+pub const Mobility = enum(u8) {
     /// Never moves after being added. Its shadow can be cached, its bounds never
     /// refitted, and its spatial cell never revisited. Calling setTransform on a
     /// static object is a bug and is reported.
@@ -176,13 +176,11 @@ pub const RenderWorld = struct {
     /// previous matrix for motion vectors.
     pub fn setTransform(self: *RenderWorld, handle: Handle, position: Vec3, rotation: Quaternion, scale: Vec3) void {
         const obj = self.resolveMut(handle) orelse return;
-        if (obj.mobility == .static) {
-            // Reported rather than silently allowed: caching decisions elsewhere
-            // are only correct because static objects really do not move, and a
-            // stale cached shadow is far harder to trace back here than a log
-            // line at the moment of the mistake.
-            std.log.warn("RenderWorld: setTransform on a .static object — use .stationary for things that move rarely", .{});
-        }
+        if (std.meta.eql(obj.position, position) and
+            @reduce(.And, obj.rotation == rotation) and
+            std.meta.eql(obj.scale, scale)) return;
+        if (obj.mobility == .static) std.log.warn("RenderWorld: setTransform on a .static object, use .stationary for things that move rarely", .{});
+
         obj.position = position;
         obj.rotation = rotation;
         obj.scale = scale;
@@ -217,11 +215,6 @@ pub const RenderWorld = struct {
             if (obj.generation == 0 or !obj.visible) continue;
             if (obj.dirty) self.stats.moved += 1;
 
-            // Camera culling here rather than in SceneRenderer: an object
-            // rejected now never enters any queue, so it costs nothing further.
-            // NOTE this is the CAMERA test only -- shadow submission is culled
-            // per light view inside the renderer, because an object behind the
-            // camera can still cast into view.
             if (!frustum.intersectsSphere(obj.bounds)) continue;
             self.stats.visible += 1;
 
@@ -230,6 +223,8 @@ pub const RenderWorld = struct {
             inst.rotation = obj.rotation;
             inst.scale = obj.scale;
             inst.cast_shadows = obj.cast_shadows;
+            inst.shadow_cacheable = !obj.dirty;
+
             if (obj.dirty) {
                 scene.drawMoved(inst, obj.prev_matrix);
             } else {

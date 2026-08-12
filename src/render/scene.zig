@@ -91,6 +91,7 @@ const ShadowSubmission = struct {
     /// the whole batch key here -- a depth pass has no material, so twelve
     /// differently coloured spheres sharing a mesh are one draw.
     key: u32,
+    cacheable: bool,
 };
 
 /// A submesh queued for the main opaque pass, with the world bounds camera
@@ -194,6 +195,10 @@ pub const SceneRenderer = struct {
     /// Submeshes submitted vs. those that survived camera culling last frame.
     submitted_draws: u32 = 0,
     visible_draws: u32 = 0,
+    /// Instances drawn into shadow tiles whose geometry did not move this frame.
+    /// These are what caching would eliminate. Compare against shadow_instances
+    /// for the fraction of shadow work that is redundant.
+    shadow_static_instances: u32 = 0,
 
     /// Skip camera frustum culling. Useful when debugging: if geometry vanishes
     /// unexpectedly, turning this off says immediately whether culling is the
@@ -377,6 +382,7 @@ pub const SceneRenderer = struct {
         self.shadow_instances = 0;
         self.submitted_draws = 0;
         self.visible_draws = 0;
+        self.shadow_static_instances = 0;
 
         // Caster SETUP runs here rather than in end() because it stamps a
         // shadow_index onto each light, and beginFrame below bakes those indices
@@ -427,6 +433,7 @@ pub const SceneRenderer = struct {
                     .model = model_matrix,
                     .bounds = submesh.bounds.transform(model_matrix),
                     .key = submesh.vbuf.id,
+                    .cacheable = inst.shadow_cacheable,
                 }) catch {};
             }
         }
@@ -518,6 +525,7 @@ pub const SceneRenderer = struct {
             while (j < items.len and items[j].key == key) : (j += 1) {
                 if (!frustum.intersectsSphere(items[j].bounds)) continue;
                 self.instance_scratch.append(self.allocator, items[j].model) catch {};
+                if (items[j].cacheable) self.shadow_static_instances += 1;
             }
             if (self.instance_scratch.items.len > 0) {
                 self.shadow_draws += 1;
