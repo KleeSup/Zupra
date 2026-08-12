@@ -158,6 +158,20 @@ pub const Framebuffer = struct {
         };
     }
 
+    /// The depth buffer as a sampleable texture, or null when this target has no
+    /// depth. Note this is built from depth_sample rather than depth_view: the
+    /// latter attaches the buffer to a pass and cannot be bound to a sampler.
+    pub fn depthTexture(self: Framebuffer) ?Texture {
+        if (self.depth_img.id == 0) return null;
+        return .{
+            .img = self.depth_img,
+            .view = self.depth_sample,
+            .width = self.width,
+            .height = self.height,
+            .format = self.depth_format,
+        };
+    }
+
     /// The signature batchers/renderers pass to begin() so their pipelines match
     /// this target's formats + sample count.
     pub fn passSignature(self: Framebuffer) PassSignature {
