@@ -60,3 +60,9 @@ pub const DepthPrepass = @import("depth_prepass.zig").DepthPrepass;
 pub const FirstPersonController = @import("fpscontroller.zig").FirstPersonController;
 
 pub const gltf = @import("gltf.zig");
+
+pub const RenderWorld = @import("render_world.zig").RenderWorld;
+pub const RenderObject = @import("render_world.zig").Object;
+pub const RenderHandle = @import("render_world.zig").Handle;
+pub const Mobility = @import("render_world.zig").Mobility;
+pub const VelocityPass = @import("velocity.zig").VelocityPass;

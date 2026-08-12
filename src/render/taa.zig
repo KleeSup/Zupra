@@ -50,7 +50,7 @@ const TaaParams = extern struct {
     inv_view_proj: [16]f32,
     prev_view_proj: [16]f32,
     params: [4]f32, // 1/w, 1/h, blend weight, origin_top_left
-    flags: [4]f32, // reset, variance gamma, history sharpening, unused
+    flags: [4]f32, // reset, variance gamma, history sharpening, velocity bound
 };
 
 pub const Settings = struct {
@@ -209,7 +209,16 @@ pub const Taa = struct {
     /// `view_proj` must be UNJITTERED -- the jitter is a rendering offset, not
     /// part of where the surface actually is, and feeding it in here would make
     /// the reprojection chase the jitter sequence instead of the camera.
-    pub fn resolve(self: *Taa, color: Texture, depth_view: sg.View, view_proj: Matrix) Texture {
+    /// `velocity_view` carries per-object motion where it exists and zero
+    /// elsewhere. Pass null to fall back to camera reprojection everywhere,
+    /// which is correct for a scene with no moving geometry.
+    pub fn resolve(
+        self: *Taa,
+        color: Texture,
+        depth_view: sg.View,
+        velocity_view: ?sg.View,
+        view_proj: Matrix,
+    ) Texture {
         const write_index = 1 - self.read_index;
         const dst = self.history[write_index];
 
@@ -242,7 +251,7 @@ pub const Taa = struct {
                 if (self.reset) 1.0 else 0.0,
                 self.settings.variance_gamma,
                 self.settings.history_sharpening,
-                0,
+                if (velocity_view != null) 1.0 else 0.0,
             },
         };
 
@@ -253,6 +262,11 @@ pub const Taa = struct {
             bindings.views[shd.VIEW_tex_color] = color.view;
             bindings.views[shd.VIEW_tex_history] = self.history[self.read_index].sample_view;
             bindings.views[shd.VIEW_tex_depth] = depth_view;
+            // Sokol requires every declared binding to be filled. A 1x1 white
+            // texture reads as a non-zero velocity, so the depth view stands in
+            // when there is no velocity buffer: it is never sampled, because the
+            // flag above gates the read.
+            bindings.views[shd.VIEW_tex_velocity] = velocity_view orelse depth_view;
             bindings.samplers[shd.SMP_smp] = self.sampler;
 
             sg.applyPipeline(pip);

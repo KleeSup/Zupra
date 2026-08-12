@@ -299,7 +299,7 @@ pub const PostChain = struct {
         // --- Tonemap ---
         // If nothing follows, tonemap straight to the swapchain (no intermediate).
         const ldr_count = self.countEnabled(.ldr);
-        if (ldr_count == 0 and self.aa == .none) {
+        if (ldr_count == 0 and !self.postAaRuns()) {
             zupra.beginDrawingClear(self.clear_color);
             self.present_.render(hdr_src, PassSignature.swapchainPass());
             zupra.endDrawing();
@@ -320,7 +320,7 @@ pub const PostChain = struct {
 
             // The last thing in the whole chain writes directly to the
             // swapchain — no pointless blit through an intermediate.
-            if (ldr_left == 0 and self.aa == .none) {
+            if (ldr_left == 0 and !self.postAaRuns()) {
                 zupra.beginDrawingClear(self.clear_color);
                 self.runEffect(e, ldr_src, depth, PassSignature.swapchainPass());
                 zupra.endDrawing();
@@ -338,13 +338,25 @@ pub const PostChain = struct {
         }
 
         // --- Anti-aliasing (always last: it wants the finished image) ---
-        zupra.beginDrawingClear(self.clear_color);
-        switch (self.aa) {
-            .none, .taa => {},
-            .fxaa => self.fxaa(ldr_src, PassSignature.swapchainPass()),
-            .fxaa_quality => self.fxaaQuality(ldr_src, PassSignature.swapchainPass()),
+        if (self.postAaRuns()) {
+            zupra.beginDrawingClear(self.clear_color);
+            switch (self.aa) {
+                .none, .taa => unreachable, // postAaRuns() excluded these
+                .fxaa => self.fxaa(ldr_src, PassSignature.swapchainPass()),
+                .fxaa_quality => self.fxaaQuality(ldr_src, PassSignature.swapchainPass()),
+            }
+            zupra.endDrawing();
         }
-        zupra.endDrawing();
+    }
+
+    /// Whether the post chain itself runs an AA filter at the end. TAA resolves
+    /// upstream in SceneRenderer, so as far as this chain is concerned it is the
+    /// same as no filter, and the last pass can write straight to the swapchain.
+    fn postAaRuns(self: PostChain) bool {
+        return switch (self.aa) {
+            .none, .taa => false,
+            .fxaa, .fxaa_quality => true,
+        };
     }
 
     /// Run one user effect as a fullscreen pass. Everything an effect needs is

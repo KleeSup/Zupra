@@ -15,6 +15,7 @@ pub const sky_cube = @import("sky_cube.glsl.zig");
 pub const ssao = @import("ssao.glsl.zig");
 pub const ssao_blur = @import("ssao_blur.glsl.zig");
 pub const taa_resolve = @import("taa_resolve.glsl.zig");
+pub const velocity = @import("velocity.glsl.zig");
 
 pub const bloom_composite = @import("bloom_composite.glsl.zig");
 pub const bloom_downsample = @import("bloom_downsample.glsl.zig");

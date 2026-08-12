@@ -64,13 +64,14 @@ layout(binding=0) uniform taa_params {
     // w = 1 when the render target reads top-left first.
     vec4 params;
     // x = 1 to reset history, y = variance clipping gamma,
-    // z = history sharpening 0..1, w unused.
+    // z = history sharpening 0..1, w = 1 when a velocity buffer is bound.
     vec4 flags;
 };
 
 layout(binding=0) uniform texture2D tex_color;
 layout(binding=1) uniform texture2D tex_history;
 layout(binding=2) uniform texture2D tex_depth;
+layout(binding=3) uniform texture2D tex_velocity;
 layout(binding=0) uniform sampler smp;
 
 in vec2 v_uv;
@@ -216,21 +217,38 @@ void main() {
     vec3 box_min = mu - gamma * sigma;
     vec3 box_max = mu + gamma * sigma;
 
-    // Where was this surface last frame?
+    // Camera reprojection, computed unconditionally. It is a handful of
+    // arithmetic operations with no texture fetch, so computing it and then
+    // discarding it where a recorded velocity exists is cheaper than the branch
+    // would be, and it keeps the control flow flat. Early returns nested inside
+    // conditionals are exactly what SPIRV-Cross restructures badly on the HLSL
+    // path.
     float raw_depth = textureLod(sampler2D(tex_depth, smp), v_uv, 0.0).r;
     vec4 world_h = inv_view_proj * vec4(v_ndc, raw_depth, 1.0);
     vec3 world = world_h.xyz / world_h.w;
-
     vec4 prev_clip = prev_view_proj * vec4(world, 1.0);
-    if (prev_clip.w <= 0.0) {
-        frag_color = vec4(current, 1.0); // behind last frame's eye
-        return;
-    }
-    vec2 prev_uv = (prev_clip.xy / prev_clip.w) * 0.5 + 0.5;
-    if (flip) prev_uv.y = 1.0 - prev_uv.y;
 
-    if (prev_uv.x < 0.0 || prev_uv.x > 1.0 || prev_uv.y < 0.0 || prev_uv.y > 1.0) {
-        frag_color = vec4(current, 1.0); // newly on screen: no history
+    bool camera_valid = prev_clip.w > 0.0;
+    vec2 camera_uv = camera_valid
+        ? (prev_clip.xy / max(prev_clip.w, 1e-6)) * 0.5 + 0.5
+        : v_uv;
+    if (flip) camera_uv.y = 1.0 - camera_uv.y;
+
+    vec2 velocity = vec2(0.0);
+    if (flags.w > 0.5) {
+        velocity = textureLod(sampler2D(tex_velocity, smp), v_uv, 0.0).rg;
+    }
+    bool has_velocity = dot(velocity, velocity) > 1e-12;
+
+    vec2 prev_uv = has_velocity ? (v_uv + velocity) : camera_uv;
+
+    // No history where the camera reprojection was invalid and nothing recorded
+    // a velocity, or where the surface was off screen last frame.
+    bool usable = (has_velocity || camera_valid)
+        && prev_uv.x >= 0.0 && prev_uv.x <= 1.0
+        && prev_uv.y >= 0.0 && prev_uv.y <= 1.0;
+    if (!usable) {
+        frag_color = vec4(current, 1.0);
         return;
     }
 

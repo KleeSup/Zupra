@@ -1,36 +1,32 @@
 //! examples/playground.zig
 //!
-//! AO VALIDATION RIG.
+//! RenderWorld and motion vector test.
 //!
-//! Built to make the AO buffer CHECKABLE rather than merely viewable. Judging
-//! occlusion from a lit screenshot is close to useless: a uniform 10% darkening
-//! and a correct result look much the same, which is exactly how a global error
-//! survives several rounds of tuning the crease behaviour.
+//! Built to make ghosting obvious when it is present and clearly absent when it
+//! is fixed. The arrangement is deliberate in three ways.
 //!
-//! So the scene is arranged around regions whose correct answer is known in
-//! advance:
+//! Motion is fast and lateral. A slow or head-on movement produces a small
+//! screen-space offset, and camera reprojection alone is nearly right for it, so
+//! a broken velocity buffer would look almost correct. Objects here cross the
+//! screen quickly, which is where the difference is largest.
 //!
-//!   * A LARGE EMPTY FLOOR. Nothing within any plausible radius. Correct AO here
-//!     is exactly 1.0 -- pure white in the raw buffer, and the lit image
-//!     identical whether AO is on or off. If this region darkens, the bug is in
-//!     the open-surface path and no amount of crease tuning will find it.
-//!   * A SINGLE ISOLATED SPHERE on that floor. The contact ring is the only
-//!     thing that should darken. Its silhouette against the empty floor is where
-//!     a rim artifact shows up unambiguously, with nothing else nearby to
-//!     confuse it.
-//!   * AN INSIDE CORNER, far from everything else. Should darken smoothly toward
-//!     the seam and nowhere else.
-//!   * A STAIR of blocks with 90-degree inside angles at three different scales,
-//!     to check that the radius resolves detail at the scale it claims to.
+//! Moving objects pass in front of high contrast backgrounds. Ghosting is a
+//! stale colour blended into the current one, so it only shows where the two
+//! differ. A pale object over a pale floor hides it almost completely, and the
+//! dark banded wall behind the track exists for exactly this reason.
 //!
-//! Everything is the same matte white: occlusion scales the ambient DIFFUSE
-//! term, so metal or dark albedo hides it, and a single material means any
-//! shading difference is geometric.
+//! Every kind of motion is represented. Translation alone would not catch a
+//! velocity pass that ignores rotation, since per-object velocity and per-vertex
+//! velocity agree for pure translation and disagree everywhere else. So there
+//! are spinning objects, orbiting objects, and one that scales.
+//!
+//! The moving lamp carries a small emissive marker so the light source is
+//! visible rather than inferred, and moves independently of the geometry it
+//! lights, which puts moving shadows across static objects.
 //!
 //! Keys:
-//!   1  AO on/off        9  view raw AO buffer (the one that matters)
-//!   2/3  radius -/+     4/5  intensity -/+     6/7  slices -/+   8  steps cycle
-//!   0  bloom + TAA off (isolate AO completely)
+//!   1  TAA on/off        2  pause all motion       3  velocity buffer view
+//!   4  slow motion       5  bloom on/off           6  AO on/off
 
 const std = @import("std");
 const zupra = @import("zupra");
@@ -43,6 +39,8 @@ const Light = zupra.render.Light;
 const LightHandle = zupra.render.LightHandle;
 const Environment = zupra.render.Environment;
 const Camera2D = zupra.render.Camera2D;
+const RenderWorld = zupra.render.RenderWorld;
+const RenderHandle = zupra.render.RenderHandle;
 const Sprite = zupra.graphics.texture.Sprite;
 const TextureRegion = zupra.graphics.texture.TextureRegion;
 
@@ -53,30 +51,63 @@ var scene: zupra.render.SceneRenderer = undefined;
 var cam: zupra.render.Camera3D = undefined;
 var env: Environment = undefined;
 var controller: zupra.render.FirstPersonController = undefined;
+var world: RenderWorld = undefined;
 
 var font: zupra.render.Font = undefined;
 var batch: zupra.render.SpriteBatch = undefined;
 var ui_cam: Camera2D = undefined;
 var text: zupra.render.TextBatch2D = undefined;
 
-/// One matte white material everywhere. Occlusion acts on ambient diffuse, so a
-/// metal or a dark base colour hides it; uniform material means every shading
-/// difference on screen is geometry.
-const chalk = Material{
-    .base_color = .{ .r = 0.85, .g = 0.85, .b = 0.85, .a = 1 },
-    .metallic = 0.0,
-    .roughness = 1.0,
+var floor_model: Model = undefined;
+var backdrop_light: Model = undefined;
+var backdrop_dark: Model = undefined;
+var pillar_model: Model = undefined;
+var runner_model: Model = undefined;
+var spinner_model: Model = undefined;
+var pulser_model: Model = undefined;
+var lamp_marker: Model = undefined;
+var lamp_post: Model = undefined;
+
+/// Objects that translate across the screen. Lateral motion at speed is where a
+/// missing velocity buffer shows up most clearly.
+const Runner = struct {
+    handle: RenderHandle = undefined,
+    z: f32,
+    speed: f32,
+    phase: f32,
+    height: f32,
+};
+var runners = [_]Runner{
+    .{ .z = -2.0, .speed = 7.0, .phase = 0.0, .height = 0.8 },
+    .{ .z = 1.0, .speed = -5.5, .phase = 1.7, .height = 1.6 },
+    .{ .z = 4.0, .speed = 9.0, .phase = 3.1, .height = 2.6 },
 };
 
-var floor_model: Model = undefined;
-var wall_model: Model = undefined;
-var ball_model: Model = undefined;
-var block_l: Model = undefined;
-var block_m: Model = undefined;
-var block_s: Model = undefined;
+/// Objects that rotate in place. Rotation is the case per-object velocity gets
+/// wrong and per-vertex velocity gets right, since parts of the object move at
+/// different rates.
+const Spinner = struct {
+    handle: RenderHandle = undefined,
+    x: f32,
+    speed: f32,
+};
+var spinners = [_]Spinner{
+    .{ .x = -6.0, .speed = 2.2 },
+    .{ .x = 0.0, .speed = -3.4 },
+    .{ .x = 6.0, .speed = 1.6 },
+};
 
-var show_ao_buffer = false;
-var isolate = false;
+/// One object that scales, since a changing scale is a third distinct case.
+var pulser: RenderHandle = undefined;
+
+var lamp_marker_handle: RenderHandle = undefined;
+var lamp_post_handle: RenderHandle = undefined;
+var lamp_light: LightHandle = undefined;
+
+var elapsed: f32 = 0;
+var paused = false;
+var slow = false;
+var show_velocity = false;
 
 var fps_accum: f32 = 0;
 var fps_frames: u32 = 0;
@@ -90,12 +121,13 @@ pub fn main(ctx: std.process.Init) !void {
 pub fn init() void {
     gpa = zupra.getGPA();
     cache = .init(gpa);
-    scene = zupra.render.SceneRenderer.init(gpa, &cache, .forward, 1280, 720);
-    scene.setAAMethod(.none); // nothing between the AO and the eye
+    scene = zupra.render.SceneRenderer.init(gpa, &cache, .deferred, 1280, 720);
+    scene.setAAMethod(.taa);
 
     cam = zupra.render.Camera3D.init(16.0 / 9.0);
-    // Standing on the empty half of the floor, looking toward the test geometry.
-    controller = .init(.{ .x = 0, .y = 2.2, .z = -16 });
+    // Side on to the track, so the runners cross the view rather than approach
+    // it. Screen-space motion is largest here, and so is any error in it.
+    controller = .init(.{ .x = 0, .y = 4.0, .z = -18 });
 
     font = zupra.render.Font.initFromMemory(gpa, @embedFile("assets/OpenSans-Regular.ttf"), .{}) catch unreachable;
     batch = zupra.render.SpriteBatch.init(gpa, &cache, .{}) catch unreachable;
@@ -103,117 +135,202 @@ pub fn init() void {
     text = zupra.render.TextBatch2D.init(&font, &batch);
 
     env = Environment.init(gpa);
-    // Ambient-dominant. AO only scales the ambient term, so a scene carried by
-    // analytic lights would show almost none of it.
-    env.ambient = .{ .r = 0.42, .g = 0.42, .b = 0.45, .a = 1 };
+    env.ambient = .{ .r = 0.10, .g = 0.10, .b = 0.12, .a = 1 };
 
-    // One weak light purely for shape. AO must be visible without it -- if
-    // toggling this changes the AO, something is wired wrong.
     _ = env.addLight(Light.directional(
-        .{ .x = -0.4, .y = -1.0, .z = -0.25 },
-        .{ .r = 1, .g = 1, .b = 1, .a = 1 },
-        0.5,
+        .{ .x = -0.4, .y = -1.0, .z = -0.3 },
+        .{ .r = 0.85, .g = 0.88, .b = 1.0, .a = 1 },
+        1.2,
     )) catch unreachable;
 
-    // scene.ssao.settings = .{
-    //     .slices = 3,
-    //     .steps = 4,
-    //     .radius = 1,
-    //     .intensity = 2,
-    //     .blur_radius = 2,
-    //     .half_resolution = true,
-    // };
+    // The travelling lamp. Moves independently of the geometry it lights, so
+    // shadows sweep across static objects and moving objects alike.
+    lamp_light = env.addLight(Light.point(
+        .{ .x = 0, .y = 5.0, .z = 0 },
+        .{ .r = 1.0, .g = 0.85, .b = 0.55, .a = 1 },
+        90.0,
+        18.0,
+    )) catch unreachable;
+    if (env.getLight(lamp_light)) |l| {
+        l.shadow = .{ .enabled = true, .resolution = 512, .cascade_count = 1, .max_distance = 60 };
+    }
 
-    floor_model = Model.fromMesh(gpa, MeshBuilder.plane(80, 80), chalk) catch unreachable;
-    wall_model = Model.fromMesh(gpa, MeshBuilder.cube(12, 6, 0.4), chalk) catch unreachable;
-    ball_model = Model.fromMesh(gpa, MeshBuilder.sphere(gpa, 1.2, 48, 48) catch unreachable, chalk) catch unreachable;
-    block_l = Model.fromMesh(gpa, MeshBuilder.cube(3.0, 3.0, 3.0), chalk) catch unreachable;
-    block_m = Model.fromMesh(gpa, MeshBuilder.cube(1.0, 1.0, 1.0), chalk) catch unreachable;
-    block_s = Model.fromMesh(gpa, MeshBuilder.cube(0.3, 0.3, 0.3), chalk) catch unreachable;
+    const pale = Material{
+        .base_color = .{ .r = 0.82, .g = 0.82, .b = 0.84, .a = 1 },
+        .metallic = 0.0,
+        .roughness = 0.85,
+    };
+    const dark = Material{
+        .base_color = .{ .r = 0.09, .g = 0.09, .b = 0.11, .a = 1 },
+        .metallic = 0.0,
+        .roughness = 0.9,
+    };
+    const bright = Material{
+        .base_color = .{ .r = 0.95, .g = 0.93, .b = 0.88, .a = 1 },
+        .metallic = 0.0,
+        .roughness = 0.5,
+    };
+
+    floor_model = Model.fromMesh(gpa, MeshBuilder.plane(60, 60), pale) catch unreachable;
+    // Alternating light and dark panels behind the track. Ghosting is a stale
+    // colour mixed into the current one, so it is only visible where the two
+    // differ, and a moving object needs something to contrast against.
+    backdrop_light = Model.fromMesh(gpa, MeshBuilder.cube(4, 8, 0.4), bright) catch unreachable;
+    backdrop_dark = Model.fromMesh(gpa, MeshBuilder.cube(4, 8, 0.4), dark) catch unreachable;
+    pillar_model = Model.fromMesh(gpa, MeshBuilder.cube(0.9, 5.0, 0.9), pale) catch unreachable;
+    runner_model = Model.fromMesh(gpa, MeshBuilder.sphere(gpa, 0.7, 32, 32) catch unreachable, bright) catch unreachable;
+    spinner_model = Model.fromMesh(gpa, MeshBuilder.cube(1.6, 1.6, 1.6), bright) catch unreachable;
+    pulser_model = Model.fromMesh(gpa, MeshBuilder.sphere(gpa, 1.0, 32, 32) catch unreachable, bright) catch unreachable;
+    lamp_marker = Model.fromMesh(gpa, MeshBuilder.cube(0.5, 0.5, 0.5), .{
+        .base_color = .{ .r = 0.05, .g = 0.05, .b = 0.05, .a = 1 },
+        .emissive = .{ .r = 1.0, .g = 0.85, .b = 0.55, .a = 1 },
+        .emissive_strength = 12.0,
+    }) catch unreachable;
+    lamp_post = Model.fromMesh(gpa, MeshBuilder.cube(0.12, 1.2, 0.12), pale) catch unreachable;
+
+    world = RenderWorld.init(gpa);
+
+    // Static geometry. Marked .static so it is never refitted and, once shadow
+    // caching lands, never redrawn into the atlas either.
+    _ = world.add(.{ .model = &floor_model, .mobility = .static }) catch unreachable;
+
+    var i: usize = 0;
+    while (i < 9) : (i += 1) {
+        const x = -16.0 + @as(f32, @floatFromInt(i)) * 4.0;
+        const model = if (i % 2 == 0) &backdrop_light else &backdrop_dark;
+        _ = world.add(.{
+            .model = model,
+            .position = .{ .x = x, .y = 4.0, .z = 8.0 },
+            .mobility = .static,
+        }) catch unreachable;
+    }
+
+    i = 0;
+    while (i < 5) : (i += 1) {
+        const x = -12.0 + @as(f32, @floatFromInt(i)) * 6.0;
+        _ = world.add(.{
+            .model = &pillar_model,
+            .position = .{ .x = x, .y = 2.5, .z = 2.0 },
+            .mobility = .static,
+        }) catch unreachable;
+    }
+
+    for (&runners) |*r| {
+        r.handle = world.add(.{
+            .model = &runner_model,
+            .position = .{ .x = 0, .y = r.height, .z = r.z },
+            .mobility = .dynamic,
+        }) catch unreachable;
+    }
+
+    for (&spinners) |*s| {
+        s.handle = world.add(.{
+            .model = &spinner_model,
+            .position = .{ .x = s.x, .y = 1.0, .z = -6.0 },
+            .mobility = .dynamic,
+        }) catch unreachable;
+    }
+
+    pulser = world.add(.{
+        .model = &pulser_model,
+        .position = .{ .x = 10.0, .y = 1.6, .z = -4.0 },
+        .mobility = .dynamic,
+    }) catch unreachable;
+
+    // The lamp marker does not cast, since it surrounds its own light source.
+    lamp_marker_handle = world.add(.{
+        .model = &lamp_marker,
+        .position = .{ .x = 0, .y = 5.0, .z = 0 },
+        .mobility = .dynamic,
+        .cast_shadows = false,
+    }) catch unreachable;
+    lamp_post_handle = world.add(.{
+        .model = &lamp_post,
+        .position = .{ .x = 0, .y = 4.2, .z = 0 },
+        .mobility = .dynamic,
+    }) catch unreachable;
 }
 
-fn place(model: *Model, x: f32, y: f32, z: f32) void {
-    var inst = model.instance();
-    inst.setPosition(.{ .x = x, .y = y, .z = z });
-    scene.draw(inst);
+fn axisAngle(axis: zupra.math.Vec3, angle: f32) zupra.math.Quaternion {
+    return zupra.math.zm.quatFromAxisAngle(
+        zupra.math.zm.f32x4(axis.x, axis.y, axis.z, 0),
+        angle,
+    );
 }
 
-fn placeRot(model: *Model, x: f32, y: f32, z: f32, a: f32) void {
-    var inst = model.instance();
-    inst.setPosition(.{ .x = x, .y = y, .z = z });
-    inst.setRotationAxisAngle(.{ .x = 0, .y = 1, .z = 0 }, a);
-    scene.draw(inst);
-}
+const identity_quat = zupra.math.Quaternion{ 0, 0, 0, 1 };
+const unit_scale = zupra.math.Vec3{ .x = 1, .y = 1, .z = 1 };
 
 pub fn render() void {
     const dt = zupra.app.getDelta();
-    const s = &scene.ssao.settings;
+    if (!paused) elapsed += dt * (if (slow) @as(f32, 0.15) else 1.0);
 
-    if (zupra.input.isKeyJustPressed(._1)) scene.ssao_enabled = !scene.ssao_enabled;
-    if (zupra.input.isKeyJustPressed(._9)) show_ao_buffer = !show_ao_buffer;
-    if (zupra.input.isKeyJustPressed(._2)) s.radius = @max(0.05, s.radius - 0.1);
-    if (zupra.input.isKeyJustPressed(._3)) s.radius = @min(8.0, s.radius + 0.1);
-    if (zupra.input.isKeyJustPressed(._4)) s.intensity = @max(0.0, s.intensity - 0.1);
-    if (zupra.input.isKeyJustPressed(._5)) s.intensity = @min(3.0, s.intensity + 0.1);
-    if (zupra.input.isKeyJustPressed(._6) and s.slices > 1) s.slices -= 1;
-    if (zupra.input.isKeyJustPressed(._7) and s.slices < 8) s.slices += 1;
-    if (zupra.input.isKeyJustPressed(._8)) s.steps = if (s.steps >= 12) 2 else s.steps + 2;
-
-    // Everything else off, so nothing downstream can be blamed for what AO does.
-    if (zupra.input.isKeyJustPressed(._0)) {
-        isolate = !isolate;
-        scene.bloom_enabled = !isolate;
-        scene.setAAMethod(if (isolate) .none else .taa);
+    if (zupra.input.isKeyJustPressed(._1)) {
+        scene.setAAMethod(if (scene.isTaaActive()) .none else .taa);
     }
+    if (zupra.input.isKeyJustPressed(._2)) paused = !paused;
+    if (zupra.input.isKeyJustPressed(._3)) show_velocity = !show_velocity;
+    if (zupra.input.isKeyJustPressed(._4)) slow = !slow;
+    if (zupra.input.isKeyJustPressed(._5)) scene.bloom_enabled = !scene.bloom_enabled;
+    if (zupra.input.isKeyJustPressed(._6)) scene.ssao_enabled = !scene.ssao_enabled;
+
+    // Translation. Wraps at the ends of the track rather than reversing, so
+    // there is no moment of zero velocity to hide behind.
+    for (runners) |r| {
+        const span: f32 = 34.0;
+        const t = @mod(elapsed * r.speed + r.phase * 10.0, span);
+        world.setPosition(r.handle, .{ .x = -17.0 + t, .y = r.height, .z = r.z });
+    }
+
+    // Rotation, which per-object velocity cannot represent correctly.
+    for (spinners) |s| {
+        world.setTransform(
+            s.handle,
+            .{ .x = s.x, .y = 1.0, .z = -6.0 },
+            axisAngle(.{ .x = 0.3, .y = 1.0, .z = 0.15 }, elapsed * s.speed),
+            unit_scale,
+        );
+    }
+
+    // Scale, the third case.
+    const pulse = 0.6 + 0.5 * (1.0 + @sin(elapsed * 2.0));
+    world.setTransform(
+        pulser,
+        .{ .x = 10.0, .y = 1.6, .z = -4.0 },
+        identity_quat,
+        .{ .x = pulse, .y = pulse, .z = pulse },
+    );
+
+    // The lamp sweeps the track. Its light and its marker share a position, so
+    // the source is visible rather than inferred.
+    const lamp_x = @sin(elapsed * 0.6) * 13.0;
+    const lamp_z = @cos(elapsed * 0.35) * 4.0;
+    if (env.getLight(lamp_light)) |l| {
+        l.position = .{ .x = lamp_x, .y = 5.0, .z = lamp_z };
+    }
+    world.setPosition(lamp_marker_handle, .{ .x = lamp_x, .y = 5.0, .z = lamp_z });
+    world.setPosition(lamp_post_handle, .{ .x = lamp_x, .y = 4.2, .z = lamp_z });
 
     controller.update(dt);
     controller.applyTo(&cam);
 
     scene.begin(cam, &env);
-
-    place(&floor_model, 0, 0, 0);
-
-    // --- REFERENCE REGION -------------------------------------------------
-    // Everything below sits at z >= 0. The half of the floor at negative z is
-    // deliberately EMPTY: nothing within any sane radius, so correct AO there is
-    // exactly 1.0. Toggling AO must not change it at all. If it darkens, the bug
-    // is in the open-surface path.
-    // ----------------------------------------------------------------------
-
-    // A single isolated sphere. The only thing that should darken is its contact
-    // ring; its silhouette against empty floor is where a rim shows up with
-    // nothing nearby to confuse the reading.
-    place(&ball_model, -7.0, 1.2, 4.0);
-
-    // An inside corner on its own, far from the rest.
-    placeRot(&wall_model, 7.0, 3.0, 10.0, 0);
-    placeRot(&wall_model, 13.0, 3.0, 4.0, std.math.pi * 0.5);
-
-    // Three scales of 90-degree inside angle, to check the radius resolves
-    // detail at the size it claims to. A radius of 0.6 should darken the small
-    // block's seams and barely touch the large one's.
-    place(&block_l, 0.0, 1.5, 8.0);
-    place(&block_m, 2.5, 0.5, 8.0);
-    place(&block_s, 4.0, 0.15, 8.0);
-    // Each block also butted against a neighbour, forming a tight slot.
-    place(&block_m, 2.5, 1.5, 8.0);
-    place(&block_s, 4.0, 0.45, 8.0);
-
+    world.submit(&scene, cam);
     scene.end();
 
     fps_accum += dt;
     fps_frames += 1;
     if (fps_accum >= 0.25) {
         const fps = @as(f32, @floatFromInt(fps_frames)) / fps_accum;
+        const ws = world.stats;
         fps_text = std.fmt.bufPrint(
             &fps_buf,
-            "{d:.0} FPS {d:.2}ms | AO {s} r={d:.2} i={d:.2} slices={d} steps={d} | raw={s} isolate={s}  [1 ao 9 raw 2/3 r 4/5 i 6/7 slices 8 steps 0 isolate]",
+            "{d:.0} FPS {d:.2}ms | TAA {s} | objects {d}/{d} visible, {d} moved | {s}{s}  [1 taa 2 pause 3 velocity 4 slow 5 bloom 6 ao]",
             .{
-                fps,                                     1000.0 / fps,
-                if (scene.ssao_enabled) "ON" else "OFF", s.radius,
-                s.intensity,                             s.slices,
-                s.steps,                                 if (show_ao_buffer) "on" else "off",
-                if (isolate) "on" else "off",
+                fps,                                      1000.0 / fps,
+                if (scene.isTaaActive()) "on" else "off", ws.visible,
+                ws.total,                                 ws.moved,
+                if (paused) "paused " else "",            if (slow) "slow" else "",
             },
         ) catch "FPS ?";
         fps_accum = 0;
@@ -223,11 +340,14 @@ pub fn render() void {
     ui_cam.setViewport(sokol.app.widthf(), sokol.app.heightf());
     zupra.beginDrawing();
 
-    if (show_ao_buffer) {
-        var ao_sprite = Sprite.init(TextureRegion.full(scene.ssao.debugTexture()));
-        ao_sprite.dest = .{ .x = 0, .y = 0, .width = sokol.app.widthf(), .height = sokol.app.heightf() };
+    if (show_velocity) {
+        // Red and green are the signed screen-space offset to where each surface
+        // was. Static geometry should be black, since the pass only draws
+        // objects that moved.
+        var v = Sprite.init(TextureRegion.full(scene.velocity.debugTexture()));
+        v.dest = .{ .x = 0, .y = 0, .width = sokol.app.widthf(), .height = sokol.app.heightf() };
         batch.begin(ui_cam, .none);
-        batch.draw(ao_sprite);
+        batch.draw(v);
         batch.end();
     }
 
@@ -242,14 +362,18 @@ pub fn onEvent(event: *const zupra.Event) void {
 }
 
 pub fn deinit() void {
+    world.deinit();
     font.deinit();
     batch.deinit(gpa);
     floor_model.deinit();
-    wall_model.deinit();
-    ball_model.deinit();
-    block_l.deinit();
-    block_m.deinit();
-    block_s.deinit();
+    backdrop_light.deinit();
+    backdrop_dark.deinit();
+    pillar_model.deinit();
+    runner_model.deinit();
+    spinner_model.deinit();
+    pulser_model.deinit();
+    lamp_marker.deinit();
+    lamp_post.deinit();
     env.deinit();
     scene.deinit();
     cache.deinit();

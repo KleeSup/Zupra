@@ -58,6 +58,7 @@ const EnvironmentMap = @import("render.zig").EnvironmentMap;
 const Ssao = @import("render.zig").Ssao;
 const Bloom = @import("render.zig").Bloom;
 const Taa = @import("taa.zig").Taa;
+const VelocityPass = @import("velocity.zig").VelocityPass;
 
 const ShadowRenderer = @import("shadow_renderer.zig").ShadowRenderer;
 const ShadowParams = @import("shaders").mesh.ShadowParams;
@@ -114,6 +115,13 @@ const OpaqueEntry = struct {
 const ForwardEntry = struct {
     mesh: Mesh,
     model: Matrix,
+    material: Material,
+};
+
+const MovedEntry = struct {
+    mesh: Mesh,
+    model: Matrix,
+    prev_model: Matrix,
     material: Material,
 };
 
@@ -176,6 +184,7 @@ pub const SceneRenderer = struct {
     /// noise in stochastic effects. Costs one full-screen pass and two RGBA16F
     /// history targets.
     taa: Taa = undefined,
+    velocity: VelocityPass = undefined,
 
     bloom: Bloom = undefined,
     /// HDR bloom. Costs roughly a dozen small fullscreen passes, although the widest
@@ -208,6 +217,8 @@ pub const SceneRenderer = struct {
 
     // transparent draw queue (both modes); flushed sorted in the NEXT step
     transparent: std.ArrayList(TransparentEntry) = .empty,
+
+    moved_queue: std.ArrayList(MovedEntry) = .empty,
 
     // per-frame captured state
     camera: Camera3D = undefined,
@@ -247,6 +258,7 @@ pub const SceneRenderer = struct {
         self.ibl = Ibl.init(allocator, cache);
         self.bloom = Bloom.init(cache, width, height, .{});
         self.taa = Taa.init(cache, width, height, .{});
+        self.velocity = VelocityPass.init(cache, width, height);
         return self;
     }
 
@@ -255,6 +267,7 @@ pub const SceneRenderer = struct {
         self.forward_opaque.deinit(self.allocator);
         self.opaque_queue.deinit(self.allocator);
         self.instance_scratch.deinit(self.allocator);
+        self.moved_queue.deinit(self.allocator);
         if (self.mode == .deferred) {
             self.lit.deinit();
             self.gbuffer.deinit();
@@ -273,6 +286,7 @@ pub const SceneRenderer = struct {
         self.shadow_queue.deinit(self.allocator);
         self.bloom.deinit();
         self.taa.deinit();
+        self.velocity.deinit();
     }
 
     pub fn setRenderScale(self: *SceneRenderer, scale: u8) void {
@@ -331,6 +345,7 @@ pub const SceneRenderer = struct {
         self.ssao.resize(rw, rh);
         self.bloom.resize(rw, rh);
         self.taa.resize(rw, rh);
+        self.velocity.resize(rw, rh);
         self.width = rw;
         self.height = rh;
     }
@@ -357,6 +372,7 @@ pub const SceneRenderer = struct {
         self.forward_opaque.clearRetainingCapacity();
         self.opaque_queue.clearRetainingCapacity();
         self.shadow_queue.clearRetainingCapacity();
+        self.moved_queue.clearRetainingCapacity();
         self.shadow_draws = 0;
         self.shadow_instances = 0;
         self.submitted_draws = 0;
@@ -443,6 +459,23 @@ pub const SceneRenderer = struct {
                     .depth = depth,
                 }) catch {};
             }
+        }
+    }
+
+    /// Submit an instance that moved since last frame, so the velocity pass can
+    /// record where it was. Only objects whose transform actually changed need
+    /// this, since a static object's motion is entirely accounted for by the
+    /// camera reprojection TAA already does.
+    pub fn drawMoved(self: *SceneRenderer, inst: ModelInstance, prev_model: Matrix) void {
+        self.draw(inst);
+        const model_matrix = inst.modelMatrix();
+        for (inst.model.meshes, 0..) |submesh, i| {
+            self.moved_queue.append(self.allocator, .{
+                .mesh = submesh,
+                .model = model_matrix,
+                .prev_model = prev_model,
+                .material = inst.model.materials[inst.model.mesh_material[i]],
+            }) catch {};
         }
     }
 
@@ -674,9 +707,15 @@ pub const SceneRenderer = struct {
         };
         var hdr = self.scene_color.asTexture();
         if (self.isTaaActive()) {
+            self.velocity.begin(self.camera, self.opaqueDepthView());
+            for (self.moved_queue.items) |e| {
+                self.velocity.draw(e.mesh, e.model, e.prev_model, e.material);
+            }
+            self.velocity.end();
             hdr = self.taa.resolve(
                 hdr,
                 self.opaqueDepthSampleView(),
+                if (self.velocity.any_drawn) self.velocity.velocityView() else null,
                 self.camera.unjitteredViewProjection(),
             );
         }
