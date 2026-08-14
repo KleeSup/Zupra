@@ -207,7 +207,8 @@ pub const RenderWorld = struct {
     ///
     /// Call between scene.begin() and scene.end().
     pub fn submit(self: *RenderWorld, scene: *SceneRenderer, camera: Camera3D) void {
-        const frustum = Frustum.fromViewProj(camera.viewProjection());
+        _ = camera;
+        //const frustum = Frustum.fromViewProj(camera.viewProjection());
 
         self.stats = .{ .total = @intCast(self.objects.items.len) };
 
@@ -215,7 +216,7 @@ pub const RenderWorld = struct {
             if (obj.generation == 0 or !obj.visible) continue;
             if (obj.dirty) self.stats.moved += 1;
 
-            if (!frustum.intersectsSphere(obj.bounds)) continue;
+            //if (!frustum.intersectsSphere(obj.bounds)) continue;
             self.stats.visible += 1;
 
             var inst = obj.model.instance();

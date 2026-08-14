@@ -121,7 +121,7 @@ pub fn main(ctx: std.process.Init) !void {
 pub fn init() void {
     gpa = zupra.getGPA();
     cache = .init(gpa);
-    scene = zupra.render.SceneRenderer.init(gpa, &cache, .deferred, 1280, 720);
+    scene = zupra.render.SceneRenderer.init(gpa, &cache, .deferred, 1280, 720) catch unreachable;
     scene.setAAMethod(.taa);
 
     cam = zupra.render.Camera3D.init(16.0 / 9.0);

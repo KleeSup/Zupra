@@ -119,7 +119,8 @@ pub const ShadowRenderer = struct {
 
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, cache: *PipelineCache, opts: shadow.AtlasOptions) ShadowRenderer {
+    /// Returns an error now, because the atlas allocates its tile tree.
+    pub fn init(allocator: std.mem.Allocator, cache: *PipelineCache, opts: shadow.AtlasOptions) !ShadowRenderer {
         const inst_shader = sg.makeShader(shd_depth_inst.shadowDepthInstancedShaderDesc(sg.queryBackend()));
         // Sized for the worst realistic frame: every queued caster drawn into
         // every view. Overflowing is not a crash -- sokol flags the buffer and
@@ -143,7 +144,7 @@ pub const ShadowRenderer = struct {
         }
         return .{
             .cache = cache,
-            .atlas = ShadowAtlas.init(opts),
+            .atlas = try ShadowAtlas.init(allocator, opts),
             .shader = shader,
             .inst_shader = inst_shader,
             .inst_buf = inst_buf,

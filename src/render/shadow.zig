@@ -28,6 +28,7 @@
 
 const std = @import("std");
 const culling = @import("culling.zig");
+const atlas_alloc = @import("atlas_allocator.zig");
 const sg = @import("sokol").gfx;
 const math = @import("../math.zig");
 const Matrix = math.Matrix;
@@ -171,12 +172,24 @@ pub const ShadowAtlas = struct {
     /// Plain sampler, for debug visualization of raw depth.
     debug_sampler: sg.Sampler = .{},
 
-    // Shelf packer state (reset each frame).
-    shelf_x: u32 = 0,
-    shelf_y: u32 = 0,
-    shelf_height: u32 = 0,
+    /// Quadtree allocator, replacing the shelf packer.
+    ///
+    /// The shelf packer rebuilt its layout from scratch every frame, so a tile
+    /// could land anywhere depending on what was allocated before it. That is
+    /// fine while every tile is transient and fatal once any tile is cached,
+    /// because a cached tile is only reusable if it is still in the same texels.
+    /// This allocator distinguishes the two lifetimes and leaves persistent
+    /// tiles untouched by beginFrame.
+    tiles: atlas_alloc.AtlasAllocator,
 
-    pub fn init(opts: AtlasOptions) ShadowAtlas {
+    /// True once any tile in the atlas holds cached depth, which makes the
+    /// whole-atlas clear unusable for the frame. Set by the renderer during
+    /// build, cleared by reset.
+    has_cached_tiles: bool = false,
+
+    /// Takes an allocator now, for the tile tree. Previously this returned by
+    /// value with no allocation at all.
+    pub fn init(allocator: std.mem.Allocator, opts: AtlasOptions) !ShadowAtlas {
         const size = opts.size;
         const depth_img = sg.makeImage(.{
             .width = @intCast(size),
@@ -189,6 +202,10 @@ pub const ShadowAtlas = struct {
         });
         return .{
             .size = size,
+            // 64 texels is the smallest tile worth subdividing to. Below that,
+            // a shadow map carries too little detail to be useful and the tree
+            // overhead outweighs the space saved.
+            .tiles = try atlas_alloc.AtlasAllocator.init(allocator, size, 64),
             .depth_img = depth_img,
             .depth_view = sg.makeView(.{ .depth_stencil_attachment = .{ .image = depth_img } }),
             .sample_view = sg.makeView(.{ .texture = .{ .image = depth_img } }),
@@ -211,6 +228,7 @@ pub const ShadowAtlas = struct {
     }
 
     pub fn deinit(self: *ShadowAtlas) void {
+        self.tiles.deinit();
         if (self.debug_sampler.id != 0) sg.destroySampler(self.debug_sampler);
         if (self.compare_sampler.id != 0) sg.destroySampler(self.compare_sampler);
         if (self.sample_view.id != 0) sg.destroyView(self.sample_view);
@@ -218,49 +236,61 @@ pub const ShadowAtlas = struct {
         if (self.depth_img.id != 0) sg.destroyImage(self.depth_img);
     }
 
-    pub fn resize(self: *ShadowAtlas, opts: AtlasOptions) void {
+    pub fn resize(self: *ShadowAtlas, allocator: std.mem.Allocator, opts: AtlasOptions) !void {
         if (opts.size == self.size) return;
         self.deinit();
-        self.* = ShadowAtlas.init(opts);
+        self.* = try ShadowAtlas.init(allocator, opts);
     }
 
-    /// Begin a frame's allocation. Rebuilds the layout from scratch (simple and
-    /// robust; caching will later opt specific tiles out of the reset).
+    /// Begin a frame's allocation. Releases every transient tile and leaves
+    /// persistent ones in place, which is the difference that makes caching
+    /// possible.
     pub fn reset(self: *ShadowAtlas) void {
-        self.shelf_x = 0;
-        self.shelf_y = 0;
-        self.shelf_height = 0;
+        self.tiles.beginFrame();
+        self.has_cached_tiles = false;
     }
 
-    /// Allocate a square tile of `tile_size` texels. Returns null if the atlas is
-    /// full (the caller then skips that light's shadow — graceful, not a crash).
-    /// Shelf packer: fill a row left-to-right, start a new row when it's full.
+    /// Allocate a square tile of `tile_size` texels. Returns null if the atlas
+    /// is full, and the caller then skips that light's shadow rather than
+    /// failing.
+    ///
+    /// Sizes are rounded up to a power of two by the allocator, so a request for
+    /// 300 yields a 512 tile. Every shadow resolution in use is already a power
+    /// of two, so this is not expected to bite, but it does mean the returned
+    /// tile size should be used rather than the requested one.
     pub fn allocate(self: *ShadowAtlas, tile_size: u32) ?Tile {
-        if (tile_size > self.size) return null;
+        return self.allocateWithLifetime(tile_size, .transient);
+    }
 
-        if (self.shelf_x + tile_size > self.size) {
-            // New shelf.
-            self.shelf_y += self.shelf_height;
-            self.shelf_x = 0;
-            self.shelf_height = 0;
-        }
-        if (self.shelf_y + tile_size > self.size) return null; // atlas full
+    /// Allocate a tile that survives until explicitly freed. For cached shadows:
+    /// the rectangle stays put across frames, which is what makes its depth
+    /// reusable.
+    ///
+    /// The returned handle must be passed to `freeTile` when the tile is no
+    /// longer wanted. Nothing here can tell whether a light still exists, so
+    /// that responsibility sits with the caller.
+    pub fn allocatePersistent(self: *ShadowAtlas, tile_size: u32) ?Tile {
+        return self.allocateWithLifetime(tile_size, .persistent);
+    }
 
-        const x = self.shelf_x;
-        const y = self.shelf_y;
-        self.shelf_x += tile_size;
-        self.shelf_height = @max(self.shelf_height, tile_size);
+    pub fn freeTile(self: *ShadowAtlas, handle: atlas_alloc.Handle) void {
+        self.tiles.free(handle);
+    }
 
+    fn allocateWithLifetime(self: *ShadowAtlas, tile_size: u32, lifetime: atlas_alloc.Lifetime) ?Tile {
+        const result = self.tiles.allocate(tile_size, lifetime) orelse return null;
         const inv: f32 = 1.0 / @as(f32, @floatFromInt(self.size));
+        const r = result.rect;
         return .{
-            .x = x,
-            .y = y,
-            .size = tile_size,
+            .x = r.x,
+            .y = r.y,
+            .size = r.size,
+            .handle = result.handle,
             .rect = .{ .uv = .{
-                @as(f32, @floatFromInt(x)) * inv,
-                @as(f32, @floatFromInt(y)) * inv,
-                @as(f32, @floatFromInt(tile_size)) * inv,
-                @as(f32, @floatFromInt(tile_size)) * inv,
+                @as(f32, @floatFromInt(r.x)) * inv,
+                @as(f32, @floatFromInt(r.y)) * inv,
+                @as(f32, @floatFromInt(r.size)) * inv,
+                @as(f32, @floatFromInt(r.size)) * inv,
             } },
         };
     }
@@ -270,17 +300,46 @@ pub const ShadowAtlas = struct {
         y: u32,
         size: u32,
         rect: AtlasRect,
+        /// For releasing a persistent tile. Meaningless for transient ones,
+        /// which are released wholesale by reset.
+        handle: atlas_alloc.Handle = atlas_alloc.Handle.invalid,
     };
 
     /// The depth-only pass that clears the WHOLE atlas once per frame. Individual
     /// casters then render into their tiles with a viewport/scissor, LOADing this
     /// cleared depth (so tiles don't clobber each other).
+    ///
+    /// Incompatible with caching, which needs tiles to survive between frames.
+    /// Use loadPass plus clearTile instead when any tile is cached.
     pub fn clearPass(self: ShadowAtlas) sg.Pass {
         var action = sg.PassAction{};
         action.depth = .{ .load_action = .CLEAR, .clear_value = 1.0 };
         var att = sg.Attachments{};
         att.depth_stencil = self.depth_view;
         return .{ .action = action, .attachments = att };
+    }
+
+    /// A pass that preserves the atlas depth. The basis for caching: tiles that
+    /// are still valid are simply not touched, and tiles that need rebuilding
+    /// clear themselves through clearTile below.
+    pub fn loadPass(self: ShadowAtlas) sg.Pass {
+        return self.casterPass();
+    }
+
+    /// Clear one tile to far depth by drawing over it with a viewport.
+    ///
+    /// Sokol clears whole attachments, not regions, so a per-tile clear has to
+    /// be a draw. This is why the depth pipeline used for it has to write depth
+    /// unconditionally: a full-tile quad at z = 1 with compare ALWAYS, which
+    /// costs one quad rather than the geometry the tile used to hold.
+    pub fn tileViewport(tile: Tile, origin_top_left: bool) struct { x: i32, y: i32, w: i32, h: i32, top_left: bool } {
+        return .{
+            .x = @intCast(tile.x),
+            .y = @intCast(tile.y),
+            .w = @intCast(tile.size),
+            .h = @intCast(tile.size),
+            .top_left = origin_top_left,
+        };
     }
 
     /// A caster's pass: LOAD the already-cleared atlas depth and render into it.

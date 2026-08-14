@@ -229,7 +229,7 @@ pub const SceneRenderer = struct {
     camera: Camera3D = undefined,
     env: *Environment = undefined,
 
-    pub fn init(allocator: std.mem.Allocator, cache: *PipelineCache, mode: ShadingMode, width: u32, height: u32) SceneRenderer {
+    pub fn init(allocator: std.mem.Allocator, cache: *PipelineCache, mode: ShadingMode, width: u32, height: u32) !SceneRenderer {
         var self = SceneRenderer{
             .mode = mode,
             .cache = cache,
@@ -238,7 +238,7 @@ pub const SceneRenderer = struct {
             .height = height,
             .scene_color = undefined,
             .post = undefined,
-            .shadows = ShadowRenderer.init(allocator, cache, .{}),
+            .shadows = try ShadowRenderer.init(allocator, cache, .{}),
         };
         self.scene_color = self.makeSceneColor(mode, width, height);
         self.post = PostChain.init(allocator, cache, width, height, self.clear_color);
