@@ -388,7 +388,11 @@ pub const SceneRenderer = struct {
         // shadow_index onto each light, and beginFrame below bakes those indices
         // into the light texture the shading pass reads. The depth passes
         // themselves are issued from end(), once the geometry is known.
-        self.shadows.build(env.lighting.store.lights.items, self.camera);
+        self.shadows.build(
+            env.lighting.store.lights.items,
+            env.lighting.store.owners.items,
+            self.camera,
+        );
 
         env.lighting.beginFrame(
             camera,

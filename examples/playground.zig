@@ -67,6 +67,7 @@ var spinner_model: Model = undefined;
 var pulser_model: Model = undefined;
 var lamp_marker: Model = undefined;
 var lamp_post: Model = undefined;
+var truck: Model = undefined;
 
 /// Objects that translate across the screen. Lateral motion at speed is where a
 /// missing velocity buffer shows up most clearly.
@@ -99,6 +100,8 @@ var spinners = [_]Spinner{
 
 /// One object that scales, since a changing scale is a third distinct case.
 var pulser: RenderHandle = undefined;
+
+var truck_handle: RenderHandle = undefined;
 
 var lamp_marker_handle: RenderHandle = undefined;
 var lamp_post_handle: RenderHandle = undefined;
@@ -188,6 +191,9 @@ pub fn init() void {
     }) catch unreachable;
     lamp_post = Model.fromMesh(gpa, MeshBuilder.cube(0.12, 1.2, 0.12), pale) catch unreachable;
 
+    truck = zupra.render.gltf.loadMemory(gpa, @embedFile("assets/Icecream truck Texturing Versuch 1.glb")) catch unreachable;
+    truck.setShadingModel(.pbr);
+
     world = RenderWorld.init(gpa);
 
     // Static geometry. Marked .static so it is never refitted and, once shadow
@@ -248,6 +254,13 @@ pub fn init() void {
         .model = &lamp_post,
         .position = .{ .x = 0, .y = 4.2, .z = 0 },
         .mobility = .dynamic,
+    }) catch unreachable;
+
+    truck_handle = world.add(.{
+        .model = &truck,
+        .position = .{ .x = 0, .y = 0, .z = -3 },
+        .mobility = .static,
+        //.cast_shadows = false,
     }) catch unreachable;
 }
 
@@ -381,6 +394,7 @@ pub fn deinit() void {
     pulser_model.deinit();
     lamp_marker.deinit();
     lamp_post.deinit();
+    truck.deinit();
     env.deinit();
     scene.deinit();
     cache.deinit();

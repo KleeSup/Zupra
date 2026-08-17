@@ -98,10 +98,58 @@ pub const ShadowData = extern struct {
     pos_kind: [4]f32,
 };
 
+/// A point or spot light's cached shadow tiles.
+///
+/// Reservation and validity are deliberately separate. The rectangle belongs to
+/// the light for as long as the entry lives, whether or not the depth currently
+/// in it is correct, so regenerating a shadow never costs it its place in the
+/// atlas. Tiles that moved on every regeneration would defeat the point of
+/// caching.
+const CacheEntry = struct {
+    /// Identifies the light this belongs to across frames.
+    light_id: u64,
+    /// One per view: a spot uses [0], a point uses all six. Held from allocation
+    /// until the entry is evicted.
+    tiles: [max_shadow_views]ShadowAtlas.Tile = undefined,
+    view_count: u32 = 0,
+
+    /// Whether the depth in those tiles is still correct. False forces a redraw
+    /// into the same rectangles.
+    valid: bool = false,
+
+    /// The inputs the cached depth was generated from. Any change invalidates
+    /// it, since the recorded depth would no longer describe the scene.
+    light_position: Vec3 = .{ .x = 0, .y = 0, .z = 0 },
+    light_direction: Vec3 = .{ .x = 0, .y = 0, .z = 0 },
+    light_range: f32 = 0,
+    spot_outer_deg: f32 = 0,
+    resolution: u32 = 0,
+
+    /// Which frame this entry was last asked for. Entries not touched for a
+    /// frame belong to lights that are gone or no longer shadowed, and their
+    /// tiles are released.
+    last_used_frame: u64 = 0,
+};
+
 pub const ShadowRenderer = struct {
     cache: *PipelineCache,
     atlas: ShadowAtlas,
     shader: sg.Shader,
+
+    /// Cached static shadows for point and spot lights, keyed by light id.
+    ///
+    /// Directional lights are excluded for now. Their views are fitted to the
+    /// camera frustum, so they invalidate on camera movement, and handling that
+    /// well needs the fit itself to report whether it changed.
+    shadow_cache: std.ArrayListUnmanaged(CacheEntry) = .empty,
+    /// Off by default. Caching trades atlas space and complexity for skipped
+    /// draws, and a scene with few static lights gains little.
+    caching_enabled: bool = false,
+    frame_index: u64 = 0,
+
+    /// Views whose cached depth is still valid this frame, so the depth pass
+    /// skips them entirely. Indices into `casters`.
+    cached_view: std.ArrayListUnmanaged(bool) = .empty,
 
     /// Casters built this frame (all lights, all cascades/faces).
     casters: std.ArrayListUnmanaged(ShadowCaster) = .empty,
@@ -154,10 +202,115 @@ pub const ShadowRenderer = struct {
 
     pub fn deinit(self: *ShadowRenderer) void {
         self.casters.deinit(self.allocator);
+        self.shadow_cache.deinit(self.allocator);
+        self.cached_view.deinit(self.allocator);
         self.atlas.deinit();
         sg.destroyBuffer(self.inst_buf);
         sg.destroyShader(self.inst_shader);
         sg.destroyShader(self.shader);
+    }
+
+    /// Find or create this light's cache entry, and decide whether its contents
+    /// are still usable.
+    ///
+    /// Returns null when caching is off or the atlas cannot hold the tiles, and
+    /// the caller then falls back to ordinary transient allocation.
+    fn acquireCache(
+        self: *ShadowRenderer,
+        light_id: u64,
+        l: Light,
+        s: ShadowSettings,
+        view_count: u32,
+    ) ?*CacheEntry {
+        if (!self.caching_enabled) return null;
+
+        var entry: ?*CacheEntry = null;
+        for (self.shadow_cache.items) |*e| {
+            if (e.light_id == light_id) {
+                entry = e;
+                break;
+            }
+        }
+
+        if (entry == null) {
+            // Persistent tiles for every view up front. Partial allocation would
+            // leave a point light cached in some directions and not others,
+            // which reads as geometry randomly failing to cast.
+            var fresh = CacheEntry{ .light_id = light_id, .view_count = view_count };
+            var i: u32 = 0;
+            while (i < view_count) : (i += 1) {
+                const tile = self.atlas.allocatePersistent(s.resolution) orelse {
+                    // Roll back what was taken, so a failed light does not hold
+                    // atlas space it cannot use.
+                    var j: u32 = 0;
+                    while (j < i) : (j += 1) self.atlas.freeTile(fresh.tiles[j].handle);
+                    return null;
+                };
+                fresh.tiles[i] = tile;
+            }
+            self.shadow_cache.append(self.allocator, fresh) catch return null;
+            entry = &self.shadow_cache.items[self.shadow_cache.items.len - 1];
+        }
+
+        const e = entry.?;
+        e.last_used_frame = self.frame_index;
+
+        // Invalidate on any change to the inputs the depth was generated from.
+        // Resolution is included because a different tile size means different
+        // rectangles entirely, not merely different contents.
+        const moved = !vecEql(e.light_position, l.position) or
+            !vecEql(e.light_direction, l.direction) or
+            e.light_range != l.range or
+            e.spot_outer_deg != l.spot_outer_deg or
+            e.resolution != s.resolution or
+            e.view_count != view_count;
+
+        if (moved) {
+            e.valid = false;
+            e.light_position = l.position;
+            e.light_direction = l.direction;
+            e.light_range = l.range;
+            e.spot_outer_deg = l.spot_outer_deg;
+            e.resolution = s.resolution;
+            // A change of view count or resolution means the tiles themselves
+            // are wrong, not just their contents.
+            if (e.view_count != view_count or e.resolution != s.resolution) {
+                var i: u32 = 0;
+                while (i < e.view_count) : (i += 1) self.atlas.freeTile(e.tiles[i].handle);
+                e.view_count = 0;
+                return null; // reallocated next frame, transient this one
+            }
+        }
+
+        return e;
+    }
+
+    /// Release tiles for lights that were not asked about this frame, which
+    /// means they were removed or stopped casting shadows.
+    fn evictStaleCache(self: *ShadowRenderer) void {
+        var i: usize = 0;
+        while (i < self.shadow_cache.items.len) {
+            const e = &self.shadow_cache.items[i];
+            if (e.last_used_frame == self.frame_index) {
+                i += 1;
+                continue;
+            }
+            var v: u32 = 0;
+            while (v < e.view_count) : (v += 1) self.atlas.freeTile(e.tiles[v].handle);
+            _ = self.shadow_cache.swapRemove(i);
+        }
+    }
+
+    /// Invalidate every cached shadow. For when the scene changed in a way the
+    /// per-light checks cannot see, such as a static caster being added, moved
+    /// or removed.
+    ///
+    /// A static light and a static camera do not imply a static shadow: an
+    /// object entering or leaving a light's volume changes the depth while
+    /// nothing about the light changes. Until caster-scene versioning exists,
+    /// this is the caller's way to say so.
+    pub fn invalidateCache(self: *ShadowRenderer) void {
+        for (self.shadow_cache.items) |*e| e.valid = false;
     }
 
     /// PassSignature for the depth-only atlas passes: no color, depth only.
@@ -176,23 +329,53 @@ pub const ShadowRenderer = struct {
     ///
     /// Phase 1 handles DIRECTIONAL lights. Spot/point builders slot in here as
     /// additional branches, each appending casters + one ShadowData.
-    pub fn build(self: *ShadowRenderer, lights: []Light, camera: Camera3D) void {
+    /// `owners` is the light store's parallel array of stable handle ids, one
+    /// per light, and may be empty when the caller has none to give.
+    ///
+    /// The cache is keyed on those ids rather than on a light's index, because
+    /// LightStore.remove swap-and-pops and flush() re-sorts by type, so an index
+    /// identifies a different light from one frame to the next. Keying on it
+    /// would hand one light another's cached tile, which looks correct until it
+    /// does not. Without owners, caching is simply skipped rather than done
+    /// unsafely.
+    pub fn build(self: *ShadowRenderer, lights: []Light, owners: []const u32, camera: Camera3D) void {
+        self.frame_index +%= 1;
         self.casters.clearRetainingCapacity();
+        self.cached_view.clearRetainingCapacity();
         self.data_count = 0;
         self.atlas.reset();
 
-        for (lights) |*l| {
+        for (lights, 0..) |*l, light_index| {
             l.shadow_index = -1; // default: unshadowed this frame
             if (!l.shadow.enabled) continue;
             if (self.data_count >= max_shadowed) continue; // out of slots -> unshadowed
 
+            const light_id: ?u64 = if (light_index < owners.len)
+                owners[light_index]
+            else
+                null;
+
             const assigned: bool = switch (l.type) {
                 .directional => self.buildDirectional(l.*, l.shadow, camera),
-                .spot => self.buildSpot(l.*, l.shadow, camera),
+                .spot => self.buildSpot(l.*, l.shadow, camera, light_id),
                 .point => self.buildPoint(l.*, l.shadow, camera),
             };
             if (assigned) {
                 l.shadow_index = @intCast(self.data_count - 1);
+            }
+        }
+
+        // Lights not seen this frame have gone or stopped casting, so their
+        // reservations are released rather than held forever.
+        if (self.caching_enabled) self.evictStaleCache();
+
+        // Any tile still holding valid cached depth means the whole-atlas clear
+        // would destroy it, so the renderer must clear per tile instead.
+        self.atlas.has_cached_tiles = false;
+        for (self.cached_view.items) |cached| {
+            if (cached) {
+                self.atlas.has_cached_tiles = true;
+                break;
             }
         }
     }
@@ -252,6 +435,11 @@ pub const ShadowRenderer = struct {
                 .cull = s.caster_cull,
                 .frustum = Frustum.fromViewProj(fit.view_proj),
             }) catch {};
+            // Directional cascades are not cached yet: they refit to the camera
+            // frustum, so invalidation needs the fit itself to report whether it
+            // changed. The flag still has to be appended to keep this array
+            // index-aligned with casters.
+            self.cached_view.append(self.allocator, false) catch {};
         }
 
         // If the atlas was full before even cascade 0 got a tile, this light is
@@ -268,7 +456,7 @@ pub const ShadowRenderer = struct {
     /// already divides by w, so a projective matrix works there unchanged, and
     /// with cascade_count of 1 both pickCascade and the blend branch fall
     /// through to cascade 0.
-    fn buildSpot(self: *ShadowRenderer, l: Light, s: ShadowSettings, camera: Camera3D) bool {
+    fn buildSpot(self: *ShadowRenderer, l: Light, s: ShadowSettings, camera: Camera3D, light_id: ?u64) bool {
         // Cheap reject: a spot whose reach never comes near the view isn't worth
         // a tile. Tiles are the scarce resource -- one wasted here is one a
         // visible light doesn't get -- so this is about allocation, not just
@@ -276,7 +464,12 @@ pub const ShadowRenderer = struct {
         const to_light = l.position.sub(camera.position).length();
         if (to_light - l.range > s.max_distance) return false;
 
-        const tile = self.atlas.allocate(s.resolution) orelse return false; // atlas full
+        // A cached entry hands back the same rectangle every frame, so its depth
+        // stays reusable. Falling back to a transient tile is always safe, just
+        // not cached.
+        const entry = if (light_id) |id| self.acquireCache(id, l, s, 1) else null;
+        const tile = if (entry) |e| e.tiles[0] else (self.atlas.allocate(s.resolution) orelse return false);
+        const reuse = if (entry) |e| e.valid else false;
 
         // The cone half-angle IS the frustum half-angle, so the vertical fov is
         // twice the outer angle at aspect 1. Clamped below a full hemisphere:
@@ -340,6 +533,11 @@ pub const ShadowRenderer = struct {
             .cull = s.caster_cull,
             .frustum = Frustum.fromViewProj(view_proj),
         }) catch {};
+        // Parallel to casters: true means the depth pass skips this view because
+        // what is already in the tile is still correct.
+        self.cached_view.append(self.allocator, reuse) catch {};
+        // Marked valid now, since the depth pass below will fill it this frame.
+        if (entry) |e| e.valid = true;
 
         self.data[self.data_count] = d;
         self.data_count += 1;
@@ -438,6 +636,10 @@ pub const ShadowRenderer = struct {
                 .cull = s.caster_cull,
                 .frustum = Frustum.fromViewProj(view_proj),
             }) catch {};
+            // Point lights are not cached yet, but the flag array has to stay
+            // index-aligned with casters or the skips below would apply to the
+            // wrong views.
+            self.cached_view.append(self.allocator, false) catch {};
         }
 
         d.normal_bias = @splat(s.normal_bias_texels * texel_world);
@@ -458,9 +660,21 @@ pub const ShadowRenderer = struct {
     pub fn render(self: *ShadowRenderer, scene: anytype) void {
         if (self.casters.items.len == 0) return;
 
-        // 1) Clear the whole atlas depth once.
-        zupra.beginDrawingPass(self.atlas.clearPass());
-        zupra.endDrawing();
+        // 1) Clear.
+        //
+        // The whole-atlas clear is the fast path and stays the default, but it
+        // would wipe every cached tile along with everything else. When any tile
+        // holds valid cached depth, each view that IS being redrawn clears its
+        // own region instead, by way of the viewport already applied below: the
+        // pass loads existing depth, and the caster draws overwrite the tile's
+        // contents wherever geometry covers it.
+        //
+        // Tiles being redrawn therefore need their stale depth cleared first,
+        // which is what clearTileDepth does.
+        if (!self.atlas.has_cached_tiles) {
+            zupra.beginDrawingPass(self.atlas.clearPass());
+            zupra.endDrawing();
+        }
 
         // 2) Each caster renders into its tile (LOAD, viewport-confined).
         //
@@ -478,7 +692,11 @@ pub const ShadowRenderer = struct {
         const origin_top_left = sg.queryFeatures().origin_top_left;
 
         const sig = self.depthPassSignature();
-        for (self.casters.items) |caster| {
+        for (self.casters.items, 0..) |caster, i| {
+            // The whole point of the cache: a view whose depth is still correct
+            // costs nothing at all, no clear and no geometry.
+            if (i < self.cached_view.items.len and self.cached_view.items[i]) continue;
+
             zupra.beginDrawingPass(self.atlas.casterPass());
             sg.applyViewport(
                 @intCast(caster.tile_x),
@@ -750,6 +968,10 @@ fn computeSplits(near: f32, far: f32, count: u32, out: *[max_cascades + 1]f32) v
 }
 
 /// Choose an up vector not parallel to the light direction.
+fn vecEql(a: Vec3, b: Vec3) bool {
+    return a.x == b.x and a.y == b.y and a.z == b.z;
+}
+
 fn pickUp(dir: Vec3) Vec3 {
     if (@abs(dir.y) > 0.99) return .{ .x = 0, .y = 0, .z = 1 };
     return .{ .x = 0, .y = 1, .z = 0 };

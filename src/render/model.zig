@@ -24,6 +24,7 @@ const pipeline = @import("../graphics/pipeline.zig");
 
 const Mesh = mesh_mod.Mesh;
 const Material = @import("material.zig").Material;
+const ShadingModel = @import("material.zig").ShadingModel;
 const MeshRenderer = mesh_mod.MeshRenderer;
 const PipelineCache = pipeline.PipelineCache;
 const PassSignature = pipeline.PassSignature;
@@ -56,6 +57,12 @@ pub const Model = struct {
     pub fn init(allocator: std.mem.Allocator, meshes: []Mesh, materials: []Material, mesh_material: []usize) Model {
         std.debug.assert(meshes.len == mesh_material.len);
         return .{ .meshes = meshes, .materials = materials, .mesh_material = mesh_material, .allocator = allocator };
+    }
+
+    pub fn setShadingModel(self: *Model, shading: ShadingModel) void {
+        for (self.materials) |*mesh| {
+            mesh.shading = shading;
+        }
     }
 
     pub fn deinit(self: *Model) void {
