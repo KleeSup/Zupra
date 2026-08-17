@@ -28,6 +28,10 @@ pub const unlit = @import("unlit.glsl.zig");
 pub const fxaa = @import("fxaa.glsl.zig");
 pub const fxaa_quality = @import("fxaa_quality.glsl.zig");
 
+pub const xegtao_main = @import("xegtao_main.glsl.zig");
+pub const xegtao_prefilter = @import("xegtao_prefilter.glsl.zig");
+pub const xegtao_denoise = @import("xegtao_denoise.glsl.zig");
+
 pub const shadow_depth = @import("shadow_depth.glsl.zig");
 pub const shadow_depth_instanced = @import("shadow_depth_instanced.glsl.zig");
 pub const depth_prepass = @import("depth_prepass.glsl.zig");

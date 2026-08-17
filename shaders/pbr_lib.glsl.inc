@@ -264,7 +264,7 @@ float sampleShadow(int shadow_index, int cascade, vec3 world_pos, float ndotl) {
     float depth_ref = proj.z; // sokol [0,1] clip depth
 
     // Past the far plane there is no data for any light type.
-    if (depth_ref > 1.0) return 1.0;
+    if (depth_ref > 1.0) return 0.0;
 
     // Outside the frustum -> lit, but ONLY for light types that have an
     // outside. A spot's cone and a cascade's box both end somewhere, and beyond
@@ -555,11 +555,26 @@ vec3 applyNormalMap(vec3 N, vec3 Tin, float w, vec2 uv, float normal_scale) {
     // Guard: a degenerate/zero tangent (seams, missing data) would NaN the
     // normal via normalize() and shade the fragment black. Skip if so.
     if (dot(Tin, Tin) < 1e-8) return N;
-    vec3 T = normalize(Tin - N * dot(N, Tin)); // Gram-Schmidt orthonormalize
+
+    // Second guard, for the case the first one misses. A tangent that is long
+    // but parallel to the normal leaves almost nothing after Gram-Schmidt, and
+    // normalizing that is NaN just the same. Exported meshes carry this at
+    // degenerate UVs, and a single NaN fragment spreads through bloom's mip
+    // chain into large black blocks that look nothing like their cause.
+    vec3 Tp = Tin - N * dot(N, Tin);
+    if (dot(Tp, Tp) < 1e-8) return N;
+
+    vec3 T = normalize(Tp);
     vec3 B = cross(N, T) * w;
     vec3 nm = texture(sampler2D(normal_map, smp_material), uv).xyz * 2.0 - 1.0;
     nm.xy *= normal_scale;
-    return normalize(mat3(T, B, N) * nm);
+
+    vec3 mapped = mat3(T, B, N) * nm;
+    // Third: a zero or non-finite sample leaves nothing to normalize. Falling
+    // back to the geometric normal loses the detail on those fragments, which is
+    // the right trade against losing the frame.
+    if (!(dot(mapped, mapped) > 1e-12)) return N;
+    return normalize(mapped);
 }
 @end
 

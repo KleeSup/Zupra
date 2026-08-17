@@ -111,6 +111,7 @@ var elapsed: f32 = 0;
 var paused = false;
 var slow = false;
 var show_velocity = false;
+var render_ao = false;
 
 var fps_accum: f32 = 0;
 var fps_frames: u32 = 0;
@@ -152,7 +153,7 @@ pub fn init() void {
         .{ .x = 0, .y = 5.0, .z = 0 },
         .{ .r = 1.0, .g = 0.85, .b = 0.55, .a = 1 },
         90.0,
-        18.0,
+        5.0,
     )) catch unreachable;
     if (env.getLight(lamp_light)) |l| {
         l.shadow = .{ .enabled = true, .resolution = 512, .cascade_count = 1, .max_distance = 60 };
@@ -192,9 +193,18 @@ pub fn init() void {
     lamp_post = Model.fromMesh(gpa, MeshBuilder.cube(0.12, 1.2, 0.12), pale) catch unreachable;
 
     truck = zupra.render.gltf.loadMemory(gpa, @embedFile("assets/Icecream truck Texturing Versuch 1.glb")) catch unreachable;
-    truck.setShadingModel(.pbr);
+    //truck.setShadingModel(.lambert);
+
+    //lamp_marker.setShadingModel(.lambert);
 
     world = RenderWorld.init(gpa);
+
+    truck_handle = world.add(.{
+        .model = &truck,
+        .position = .{ .x = 0, .y = 0, .z = -3 },
+        .mobility = .static,
+        //.cast_shadows = false,
+    }) catch unreachable;
 
     // Static geometry. Marked .static so it is never refitted and, once shadow
     // caching lands, never redrawn into the atlas either.
@@ -255,13 +265,6 @@ pub fn init() void {
         .position = .{ .x = 0, .y = 4.2, .z = 0 },
         .mobility = .dynamic,
     }) catch unreachable;
-
-    truck_handle = world.add(.{
-        .model = &truck,
-        .position = .{ .x = 0, .y = 0, .z = -3 },
-        .mobility = .static,
-        //.cast_shadows = false,
-    }) catch unreachable;
 }
 
 fn axisAngle(axis: zupra.math.Vec3, angle: f32) zupra.math.Quaternion {
@@ -286,6 +289,7 @@ pub fn render() void {
     if (zupra.input.isKeyJustPressed(._4)) slow = !slow;
     if (zupra.input.isKeyJustPressed(._5)) scene.bloom_enabled = !scene.bloom_enabled;
     if (zupra.input.isKeyJustPressed(._6)) scene.ssao_enabled = !scene.ssao_enabled;
+    if (zupra.input.isKeyJustPressed(._9)) render_ao = !render_ao;
 
     // Translation. Wraps at the ends of the track rather than reversing, so
     // there is no moment of zero velocity to hide behind.
@@ -360,11 +364,11 @@ pub fn render() void {
     ui_cam.setViewport(sokol.app.widthf(), sokol.app.heightf());
     zupra.beginDrawing();
 
-    if (show_velocity) {
+    if (render_ao) {
         // Red and green are the signed screen-space offset to where each surface
         // was. Static geometry should be black, since the pass only draws
         // objects that moved.
-        var v = Sprite.init(TextureRegion.full(scene.velocity.debugTexture()));
+        var v = Sprite.init(TextureRegion.full(scene.ssao.debugTexture()));
         v.dest = .{ .x = 0, .y = 0, .width = sokol.app.widthf(), .height = sokol.app.heightf() };
         batch.begin(ui_cam, .none);
         batch.draw(v);

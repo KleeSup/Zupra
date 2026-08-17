@@ -55,6 +55,9 @@ pub const ShadowSettings = @import("shadow.zig").ShadowSettings;
 pub const ShadowRenderer = @import("shadow_renderer.zig").ShadowRenderer;
 pub const ShadowData = @import("shadow_renderer.zig").ShadowData;
 
+pub const XeGtao = @import("xegtao.zig").XeGtao;
+pub const XeGtaoSettings = @import("xegtao.zig").Settings;
+
 pub const DepthPrepass = @import("depth_prepass.zig").DepthPrepass;
 
 pub const FirstPersonController = @import("fpscontroller.zig").FirstPersonController;

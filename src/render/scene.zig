@@ -56,6 +56,7 @@ const PostChain = @import("posprocess.zig").PostChain;
 const AAMethod = @import("posprocess.zig").AAMethod;
 const EnvironmentMap = @import("render.zig").EnvironmentMap;
 const Ssao = @import("render.zig").Ssao;
+const XGtao = @import("xegtao.zig").XeGtao;
 const Bloom = @import("render.zig").Bloom;
 const Taa = @import("taa.zig").Taa;
 const VelocityPass = @import("velocity.zig").VelocityPass;
@@ -175,7 +176,7 @@ pub const SceneRenderer = struct {
     shadow_draws: u32 = 0,
     shadow_instances: u32 = 0,
 
-    ssao: Ssao = undefined,
+    ssao: XGtao = undefined,
     /// Screen-space occlusion. Deferred only: it needs the G-buffer's normals,
     /// which the forward path does not produce.
     ssao_enabled: bool = true,
@@ -246,7 +247,7 @@ pub const SceneRenderer = struct {
         // opaque, and both modes use it to forward-shade transparents.
         self.forward = MeshRenderer.init(cache);
         self.prepass = DepthPrepass.init(cache);
-        self.ssao = Ssao.init(cache, width, height, .{});
+        self.ssao = XGtao.init(cache, width, height, .{ .mip_offset = 20 });
         if (mode == .deferred) {
             self.gbuffer = GBuffer.init(width, height);
             self.geo = GeometryRenderer.init(cache);

@@ -60,8 +60,15 @@ pub const Model = struct {
     }
 
     pub fn setShadingModel(self: *Model, shading: ShadingModel) void {
-        for (self.materials) |*mesh| {
-            mesh.shading = shading;
+        for (self.materials) |*material| {
+            material.shading = shading;
+        }
+    }
+
+    pub fn setShadingModelRule(self: *Model, rule: *const fn (material: *Material, material_index: usize) ?ShadingModel) void {
+        for (self.materials, 0..) |*material, i| {
+            const result = rule(material, i) orelse material.shading;
+            material.shading = result;
         }
     }
 
