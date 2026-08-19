@@ -70,6 +70,7 @@ const MainParams = extern struct {
     radius_params: [4]f32, // radius, falloff range, distribution power, thin comp
     counts: [4]f32, // slices, steps, final power, mip sampling offset
     temporal: [4]f32, // frame, jitter on, unused, unused
+    pyramid: [4]f32, // highest live mip, unused x3
 };
 
 const DenoiseParams = extern struct {
@@ -135,6 +136,16 @@ pub const XeGtao = struct {
     prefilter_shader: sg.Shader,
     main_shader: sg.Shader,
     denoise_shader: sg.Shader,
+    /// Point sampling for the depth pyramid and the denoise taps.
+    ///
+    /// The reference is explicit that linear filtering here is wrong: it
+    /// interpolates between neighbouring depths within a level, producing values
+    /// that describe no real surface, and the horizon search then treats those
+    /// phantoms as occluders. The pyramid already does the spatial filtering, so
+    /// the taps want a definite value.
+    point_sampler: sg.Sampler,
+    /// Linear, for whoever samples the finished AO buffer. Only matters at half
+    /// resolution, where it needs upsampling.
     sampler: sg.Sampler,
     vbuf: sg.Buffer,
 
@@ -195,6 +206,13 @@ pub const XeGtao = struct {
             // sample and needs to read it. NEAREST within a level would be more
             // correct at silhouettes, but the prefilter's outlier rejection has
             // already removed the phantom surfaces that motivated point sampling.
+            .point_sampler = sg.makeSampler(.{
+                .min_filter = .NEAREST,
+                .mag_filter = .NEAREST,
+                .mipmap_filter = .NEAREST,
+                .wrap_u = .CLAMP_TO_EDGE,
+                .wrap_v = .CLAMP_TO_EDGE,
+            }),
             .sampler = sg.makeSampler(.{
                 .min_filter = .LINEAR,
                 .mag_filter = .LINEAR,
@@ -213,6 +231,7 @@ pub const XeGtao = struct {
         self.destroyTargets();
         sg.destroyBuffer(self.vbuf);
         sg.destroySampler(self.sampler);
+        sg.destroySampler(self.point_sampler);
         sg.destroyShader(self.denoise_shader);
         sg.destroyShader(self.main_shader);
         sg.destroyShader(self.prefilter_shader);
@@ -253,14 +272,22 @@ pub const XeGtao = struct {
         self.height = dims.h;
 
         // How many levels this resolution can actually support.
+        // Ceil-halving, not floor. At an odd width such as 1919, floor division
+        // drops the last column at every level and the pyramid stops describing
+        // the right region. Stopping at 1x1 rather than continuing avoids
+        // creating repeated 1x1 levels at very small window sizes.
         var count: u32 = 0;
         var w = dims.w;
         var h = dims.h;
-        while (count < mip_levels and w >= 1 and h >= 1) : (count += 1) {
+        while (count < mip_levels) : (count += 1) {
             self.mip_width[count] = w;
             self.mip_height[count] = h;
-            w = @max(1, w / 2);
-            h = @max(1, h / 2);
+            if (w == 1 and h == 1) {
+                count += 1;
+                break;
+            }
+            w = @max(1, (w + 1) / 2);
+            h = @max(1, (h + 1) / 2);
         }
         self.live_mips = @max(1, count);
 
@@ -379,7 +406,12 @@ pub const XeGtao = struct {
             var p = MainParams{
                 .view = @bitCast(camera.view()),
                 .ndc_to_view_mul = .{ 2.0 * tan_half_x, y_mul, 0, 0 },
-                .ndc_to_view_add = .{ -tan_half_x, y_add, 0, 0 },
+                .ndc_to_view_add = .{
+                    -tan_half_x - camera.jitter[0] * tan_half_x,
+                    y_add - camera.jitter[1] * tan_half_y,
+                    0,
+                    0,
+                },
                 .viewport = .{
                     1.0 / @as(f32, @floatFromInt(self.width)),
                     1.0 / @as(f32, @floatFromInt(self.height)),
@@ -404,6 +436,11 @@ pub const XeGtao = struct {
                     0,
                     0,
                 },
+                // The reference hardcodes 5 because it always builds five
+                // levels. This build creates fewer at small window sizes, so
+                // clamping to a constant would let the search sample a level
+                // that was never written.
+                .pyramid = .{ @floatFromInt(self.live_mips - 1), 0, 0, 0 },
             };
 
             zupra.beginDrawingFramebufferClear(self.ao, .{ .r = 1, .g = 1, .b = 1, .a = 1 });
@@ -415,7 +452,7 @@ pub const XeGtao = struct {
             bindings.views[shd_main.VIEW_tex_depth_even] = self.depth_texture[0];
             bindings.views[shd_main.VIEW_tex_depth_odd] = self.depth_texture[1];
             bindings.views[shd_main.VIEW_tex_normal] = normal_view;
-            bindings.samplers[shd_main.SMP_smp] = self.sampler;
+            bindings.samplers[shd_main.SMP_smp] = self.point_sampler;
 
             sg.applyPipeline(pip);
             sg.applyBindings(bindings);
@@ -460,7 +497,7 @@ pub const XeGtao = struct {
         var bindings = sg.Bindings{};
         bindings.vertex_buffers[0] = self.vbuf;
         bindings.views[shd_pre.VIEW_tex_source] = source;
-        bindings.samplers[shd_pre.SMP_smp] = self.sampler;
+        bindings.samplers[shd_pre.SMP_smp] = self.point_sampler;
 
         sg.applyPipeline(pip);
         sg.applyBindings(bindings);
@@ -483,7 +520,7 @@ pub const XeGtao = struct {
         bindings.views[shd_den.VIEW_tex_ao] = src.sample_view;
         // Level 0 is even, so it lives in image 0.
         bindings.views[shd_den.VIEW_tex_depth] = self.depth_texture[0];
-        bindings.samplers[shd_den.SMP_smp] = self.sampler;
+        bindings.samplers[shd_den.SMP_smp] = self.point_sampler;
 
         sg.applyPipeline(pip);
         sg.applyBindings(bindings);
@@ -515,7 +552,7 @@ pub const XeGtao = struct {
     }
 
     pub fn aoSampler(self: XeGtao) sg.Sampler {
-        return self.sampler;
+        return if (self.settings.half_resolution) self.sampler else self.point_sampler;
     }
 
     /// The AO buffer as a texture, for drawing to screen. Seeing the raw buffer

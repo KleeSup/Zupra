@@ -729,7 +729,7 @@ pub const SceneRenderer = struct {
                 hdr,
                 self.opaqueDepthSampleView(),
                 if (self.velocity.any_drawn) self.velocity.velocityView() else null,
-                self.camera.unjitteredViewProjection(),
+                self.camera.viewProjection(),
             );
         }
         if (self.bloom_enabled) hdr = self.bloom.render(hdr);

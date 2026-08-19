@@ -49,6 +49,9 @@ layout(binding=0) uniform gtao_params {
     vec4 counts;
     // x = frame index, y = 1 when temporal jitter is on, zw unused.
     vec4 temporal;
+    // x = highest live pyramid mip, yzw unused. Not a constant: this build
+    // creates fewer than five levels at small window sizes.
+    vec4 pyramid;
 };
 
 // The pyramid is split across two images by level parity, because sokol cannot
@@ -63,7 +66,6 @@ out vec4 frag_color;
 
 const float XE_PI = 3.1415926535897932384626433832795;
 const float XE_PI_HALF = 1.5707963267948966192313216916398;
-const float DEPTH_MIP_LEVELS = 5.0;
 
 // If an offset is under about a pixel, push it out. A tap on the pixel itself
 // carries no information.
@@ -156,8 +158,8 @@ void main() {
 
     // Approximate view-space size of one pixel at this depth, which converts the
     // world radius into a screen radius.
-    float pixel_dir_rb_viewspace_size_at_center_z = viewspace_z * ndc_to_view_mul.x * viewport.x;
-    float screenspace_radius = effect_radius / pixel_dir_rb_viewspace_size_at_center_z;
+    float pixel_dir_rb_viewspace_size_at_center_z = abs(viewspace_z * ndc_to_view_mul.x * viewport.x);
+    float screenspace_radius = effect_radius / max(pixel_dir_rb_viewspace_size_at_center_z, 1e-6);
 
     // Fade out where the radius spans too few pixels to carry information.
     //
@@ -198,7 +200,7 @@ void main() {
         // saturate, not clamp to [-1,1]. A projected normal facing away from the
         // viewer is degenerate here, and letting the cosine go negative sends
         // the arc integral somewhere meaningless.
-        float cos_norm = clamp(dot(projected_normal_vec, view_vec) / projected_normal_vec_length, 0.0, 1.0);
+        float cos_norm = clamp(dot(projected_normal_vec, view_vec) / max(projected_normal_vec_length, 1e-6), 0.0, 1.0);
         float n = sign_norm * fastACos(cos_norm);
 
         // The unoccluded horizon is the TANGENT PLANE, not -1. Minus one is 180
@@ -229,7 +231,7 @@ void main() {
             // is what lets a fixed, small tap count cover the whole radius from
             // any distance, and it is the piece that makes the screen radius
             // safe to leave unclamped.
-            float mip_level = clamp(log2(sample_offset_length) - counts.w, 0.0, DEPTH_MIP_LEVELS);
+            float mip_level = clamp(log2(sample_offset_length) - counts.w, 0.0, pyramid.x);
 
             // Snap to pixel centres, so the direction maths matches the texel
             // actually sampled.

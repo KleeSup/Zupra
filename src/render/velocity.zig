@@ -113,7 +113,7 @@ pub const VelocityPass = struct {
         std.debug.assert(!self.active);
         self.active = true;
         self.any_drawn = false;
-        self.view_proj = camera.unjitteredViewProjection();
+        self.view_proj = camera.viewProjection();
 
         zupra.beginDrawingFramebufferLoadDepth(
             self.target,
