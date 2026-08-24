@@ -74,8 +74,9 @@ pub const ShadowData = extern struct {
     /// Used to pick the cascade for a fragment by its depth.
     splits: [4]f32,
     /// Normal-offset bias in WORLD units, one per cascade (x..w = cascades
-    /// 0..3). Resolved on the CPU because it depends on each view's fitted
-    /// extent, which the shader has no way to recover from the matrix.
+    /// 0..3). Directional values are resolved from each fitted extent. Spot
+    /// and point values are their half-range reference, then the shader scales
+    /// them by actual light-to-receiver distance for perspective-map texels.
     ///
     /// Four components for up to six views: spot and point lights write the
     /// same value to all four, since every face of a cube shares one fov and one
@@ -83,13 +84,16 @@ pub const ShadowData = extern struct {
     normal_bias: [4]f32,
     /// Distance fade at the far end of the shadow range, as
     /// x = view depth where the fade starts, y = 1 / (end - start) so the shader
-    /// multiplies instead of dividing, z and w reserved.
+    /// multiplies instead of dividing. z = 1 for a local (spot or point)
+    /// light, which asks the shader to distance-scale its normal bias; w is
+    /// reserved.
     ///
     /// y = 0 disables the fade, which is how spot and point lights opt out. The
-    /// two reserved components follow the same reasoning as the unused texels in
-    /// light.zig: per-light shadow controls (strength, normal-bias override) are
-    /// the obvious next additions here, and widening a GPU-side layout later
-    /// means re-churning the packer and all three shader blocks together.
+    /// The remaining reserved component follows the same reasoning as the
+    /// unused texels in light.zig: per-light shadow controls (strength,
+    /// normal-bias override) are the obvious next additions here, and widening
+    /// a GPU-side layout later means re-churning the packer and all three shader
+    /// blocks together.
     fade: [4]f32,
     /// xyz = light world position, w = 1.0 for a cube (point) light, 0.0
     /// otherwise. The shader needs the position to work out which cube face a
@@ -520,7 +524,9 @@ pub const ShadowRenderer = struct {
         // a single map and needs no face selection.
         d.pos_kind = .{ l.position.x, l.position.y, l.position.z, 0 };
         // No distance fade: the cone's own attenuation reaches zero at range.
-        d.fade = .{ 0, 0, 0, 0 };
+        // z asks the shader to scale the half-range normal-bias reference to
+        // the receiver's actual distance from this local light.
+        d.fade = .{ 0, 0, 1, 0 };
 
         self.casters.append(self.allocator, .{
             .view_proj = view_proj,
@@ -596,8 +602,9 @@ pub const ShadowRenderer = struct {
         d.splits = @splat(far_z);
         d.pos_kind = .{ l.position.x, l.position.y, l.position.z, 1.0 };
         // No distance fade: inverse-square falloff has already taken this light
-        // to nothing by the time its shadow range ends.
-        d.fade = .{ 0, 0, 0, 0 };
+        // to nothing by the time its shadow range ends. z opts into the same
+        // perspective receiver-bias scale as a spot light.
+        d.fade = .{ 0, 0, 1, 0 };
 
         // Every face shares the fov and range, so one bias serves all six.
         var texel_world: f32 = 0;

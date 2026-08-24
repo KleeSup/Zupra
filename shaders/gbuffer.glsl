@@ -87,6 +87,7 @@ void main() {
 
     vec3 N = normalize(v_world_normal);
     N = applyNormalMap(N, v_world_tangent, v_tangent_w, uv_n, mat_params.w);
+    N = orientTwoSidedNormal(N);
 
     vec3 tex = texture(sampler2D(base_color_map, smp_material), uv_bc).rgb;
     vec3 albedo = base_color.rgb * pow(max(tex, vec3(0.0)), vec3(2.2));

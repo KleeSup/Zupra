@@ -152,7 +152,7 @@ pub fn init() void {
     lamp_light = env.addLight(Light.point(
         .{ .x = 0, .y = 5.0, .z = 0 },
         .{ .r = 1.0, .g = 0.85, .b = 0.55, .a = 1 },
-        5.0,
+        30.0,
         18.0,
     )) catch unreachable;
     if (env.getLight(lamp_light)) |l| {
@@ -288,7 +288,7 @@ pub fn render() void {
     if (zupra.input.isKeyJustPressed(._3)) {
         show_velocity = !show_velocity;
         if (show_velocity) {
-            scene.setAAMethod(.fxaa);
+            scene.setAAMethod(.fxaa_quality);
             //scene.setRenderScale(2);
         } else {
             scene.setAAMethod(.none);

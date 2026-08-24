@@ -115,7 +115,7 @@ layout(binding=4) uniform shadow_params {
     vec4 sh_split[MAX_SHADOWED];
     vec4 sh_bias[MAX_SHADOWED];
     vec4 sh_pos[MAX_SHADOWED];                 // xyz light pos, w = 1 if cube
-    vec4 sh_fade[MAX_SHADOWED];                // x fade start, y 1/span, zw reserved
+    vec4 sh_fade[MAX_SHADOWED];                // x fade start, y 1/span, z local-light bias flag
 };
 
 @include_block pbr_brdf
@@ -131,6 +131,7 @@ void main() {
 
     vec3 N = normalize(v_world_normal);
     N = applyNormalMap(N, v_world_tangent, v_tangent_w, uv_n, material.w);
+    N = orientTwoSidedNormal(N);
 
     vec3 tex = texture(sampler2D(base_color_map, smp_material), uv_bc).rgb;
     vec3 albedo = base_color.rgb * pow(max(tex, vec3(0.0)), vec3(2.2));

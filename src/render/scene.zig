@@ -39,6 +39,7 @@ const PipelineCache = pipeline.PipelineCache;
 const PassSignature = pipeline.PassSignature;
 const Mesh = mesh_mod.Mesh;
 const MeshRenderer = mesh_mod.MeshRenderer;
+const IndexType = @import("../graphics/graphics.zig").IndexType;
 const DepthPrepass = @import("depth_prepass.zig").DepthPrepass;
 const culling = @import("culling.zig");
 const Sphere = culling.Sphere;
@@ -75,6 +76,39 @@ const TransparentEntry = struct {
     bounds: Sphere,
 };
 
+/// Complete indexed-geometry identity for one instanced shadow draw. A shared
+/// vertex buffer alone is not enough: a loader may pack several submeshes into
+/// it while each chooses a different index buffer/range.
+const ShadowBatchKey = struct {
+    vbuf_id: u32,
+    ibuf_id: u32,
+    index_count: u32,
+    index_type: IndexType,
+
+    fn fromMesh(mesh: Mesh) ShadowBatchKey {
+        return .{
+            .vbuf_id = mesh.vbuf.id,
+            .ibuf_id = mesh.ibuf.id,
+            .index_count = mesh.index_count,
+            .index_type = mesh.index_type,
+        };
+    }
+
+    fn eql(a: ShadowBatchKey, b: ShadowBatchKey) bool {
+        return a.vbuf_id == b.vbuf_id and
+            a.ibuf_id == b.ibuf_id and
+            a.index_count == b.index_count and
+            a.index_type == b.index_type;
+    }
+
+    fn lessThan(a: ShadowBatchKey, b: ShadowBatchKey) bool {
+        if (a.vbuf_id != b.vbuf_id) return a.vbuf_id < b.vbuf_id;
+        if (a.ibuf_id != b.ibuf_id) return a.ibuf_id < b.ibuf_id;
+        if (a.index_count != b.index_count) return a.index_count < b.index_count;
+        return @intFromEnum(a.index_type) < @intFromEnum(b.index_type);
+    }
+};
+
 /// One submesh queued for the shadow passes, with its world-space bounds fitted
 /// once at submission.
 ///
@@ -88,10 +122,10 @@ const ShadowSubmission = struct {
     mesh: Mesh,
     model: Matrix,
     bounds: Sphere,
-    /// Sort key. The vertex buffer id identifies the geometry, and geometry is
-    /// the whole batch key here -- a depth pass has no material, so twelve
-    /// differently coloured spheres sharing a mesh are one draw.
-    key: u32,
+    /// Sort key. A depth pass ignores material, but it must preserve the full
+    /// indexed geometry identity: two submeshes may share vertex storage while
+    /// using different index buffers, counts or widths.
+    key: ShadowBatchKey,
     cacheable: bool,
 };
 
@@ -447,7 +481,7 @@ pub const SceneRenderer = struct {
                     .mesh = submesh,
                     .model = model_matrix,
                     .bounds = submesh.bounds.transform(model_matrix),
-                    .key = submesh.vbuf.id,
+                    .key = ShadowBatchKey.fromMesh(submesh),
                     .cacheable = inst.shadow_cacheable,
                 }) catch {};
             }
@@ -537,7 +571,7 @@ pub const SceneRenderer = struct {
             const key = items[i].key;
             var j = i;
             self.instance_scratch.clearRetainingCapacity();
-            while (j < items.len and items[j].key == key) : (j += 1) {
+            while (j < items.len and items[j].key.eql(key)) : (j += 1) {
                 if (!frustum.intersectsSphere(items[j].bounds)) continue;
                 self.instance_scratch.append(self.allocator, items[j].model) catch {};
                 if (items[j].cacheable) self.shadow_static_instances += 1;
@@ -612,7 +646,7 @@ pub const SceneRenderer = struct {
         // draw() keeps submission cheap and costs one pass over the queue.
         std.mem.sort(ShadowSubmission, self.shadow_queue.items, {}, struct {
             fn lessThan(_: void, a: ShadowSubmission, b: ShadowSubmission) bool {
-                return a.key < b.key;
+                return ShadowBatchKey.lessThan(a.key, b.key);
             }
         }.lessThan);
         self.shadows.render(self);

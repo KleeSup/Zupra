@@ -190,7 +190,7 @@ int punctualShadowIndex(int idx) {
 //        vec4 sh_split[MAX_SHADOWED];  // cascade far splits (view depth)
 //        vec4 sh_bias[MAX_SHADOWED];   // normal-offset bias (world), per cascade
 //        vec4 sh_pos[MAX_SHADOWED];    // xyz light position, w = 1 if cube
-//        vec4 sh_fade[MAX_SHADOWED];   // x fade start, y 1/span, zw reserved
+//        vec4 sh_fade[MAX_SHADOWED];   // x fade start, y 1/span, z local-light bias flag
 //    };
 //    uniform texture2D shadow_atlas;
 //    uniform samplerShadow smp_shadow;  // comparison sampler
@@ -309,11 +309,27 @@ float sampleShadow(int shadow_index, int cascade, vec3 world_pos, float ndotl) {
     return sum / max(count, 1.0);
 }
 
-// Sample one cascade with its own normal-offset bias. The bias is per cascade
-// because a texel covers a different amount of world space in each, and the
-// offset has to clear roughly one texel to beat acne.
+// A perspective shadow-map texel covers proportionally more world space with
+// distance from a spot/point light. `normal_bias` is authored at half the
+// light range, so local lights scale it to the receiver's actual distance.
+// Directional cascades already carry a fitted per-cascade world-space value and
+// leave this scale at one.
+float shadowReceiverBias(int shadow_index, int cascade, vec3 world_pos) {
+    float bias = cascadeNormalBias(shadow_index, cascade);
+    if (sh_fade[shadow_index].z > 0.5) {
+        float reference_distance = max(cascadeSplit(shadow_index, cascade) * 0.5, 1e-4);
+        float receiver_distance = length(world_pos - sh_pos[shadow_index].xyz);
+        bias *= clamp(receiver_distance / reference_distance, 0.02, 2.0);
+    }
+    return bias;
+}
+
+vec3 shadowReceiverPosition(int shadow_index, int cascade, vec3 world_pos, vec3 N) {
+    return world_pos + N * shadowReceiverBias(shadow_index, cascade, world_pos);
+}
+
 float shadowInCascade(int shadow_index, int cascade, vec3 world_pos, vec3 N) {
-    vec3 biased = world_pos + N * cascadeNormalBias(shadow_index, cascade);
+    vec3 biased = shadowReceiverPosition(shadow_index, cascade, world_pos, N);
     return sampleShadow(shadow_index, cascade, biased, 1.0);
 }
 
@@ -349,8 +365,14 @@ float shadowFactor(int shadow_index, vec3 world_pos, vec3 N, float view_depth) {
     // cascades and nothing to blend -- the six faces tile the sphere edge to
     // edge rather than nesting, so a fragment belongs to exactly one.
     if (sh_pos[shadow_index].w > 0.5) {
-        vec3 to_frag = world_pos - sh_pos[shadow_index].xyz;
-        return shadowInCascade(shadow_index, cubeFace(to_frag), world_pos, N);
+        // Select the face from the same biased receiver position that is
+        // projected into the atlas. Selecting before the offset can project a
+        // sample through one face while clamping it to that face's edge after
+        // it has crossed into a neighbour, producing a wrong depth test at a
+        // cube seam.
+        vec3 biased = shadowReceiverPosition(shadow_index, 0, world_pos, N);
+        vec3 to_frag = biased - sh_pos[shadow_index].xyz;
+        return sampleShadow(shadow_index, cubeFace(to_frag), biased, 1.0);
     }
 
     // Nothing left to sample past the end of the range: the outermost cascade
@@ -575,6 +597,15 @@ vec3 applyNormalMap(vec3 N, vec3 Tin, float w, vec2 uv, float normal_scale) {
     // the right trade against losing the frame.
     if (!(dot(mapped, mapped) > 1e-12)) return N;
     return normalize(mapped);
+}
+
+// glTF double-sided materials draw both windings. The back-facing fragment is
+// the reverse side of the same geometric sheet, so it must not retain the
+// front-side normal: doing so lets a light on the exterior illuminate/shadow an
+// interior wall as though the wall were transparent. Single-sided materials
+// cull these fragments before this runs, so the rule is harmless there too.
+vec3 orientTwoSidedNormal(vec3 N) {
+    return gl_FrontFacing ? N : -N;
 }
 @end
 
