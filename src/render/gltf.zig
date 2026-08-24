@@ -7,15 +7,19 @@
 //! that also pulls cameras and KHR_lights_punctual lights.
 //!
 //! HANDEDNESS. glTF is right-handed (Y-up, +Z toward viewer); the engine is
-//! left-handed. Converting between opposite handedness is inherently
-//! orientation-reversing, so we (a) apply a root flip F = diag(1,1,-1) as the
-//! outermost transform, which negates Z, and (b) reverse triangle winding to
-//! compensate for the mirror F introduces (keeping front faces front under
-//! CCW+BACK culling). Normals/tangents transform by the inverse-transpose;
-//! tangent handedness (w) flips when the transform determinant is negative.
-//! This is done PER NODE via the baked world transform — so multi-part models
-//! (a watch's dial, a character's limbs) assemble correctly, which per-vertex
-//! Z-flipping could not do.
+//! left-handed. We bake a root flip F = diag(1,1,-1) as the outermost node
+//! transform, which negates Z. Do NOT globally reverse glTF indices: the
+//! engine's LH view/projection is the matching basis change, so ordinary glTF
+//! primitives retain the CCW raster winding expected by CCW+BACK culling.
+//! Reversing every triangle would put imported meshes opposite to procedural
+//! engine meshes and cull their exterior faces. A glTF node with an additional
+//! negative-determinant transform (normally a negative scale) does need a
+//! per-primitive swap; that exceptional parity is handled below. Normals and
+//! tangents transform by the inverse-transpose; tangent handedness (w) flips
+//! whenever the baked transform determinant is negative. This is done PER NODE
+//! via the baked world transform — so multi-part models (a watch's dial, a
+//! character's limbs) assemble correctly, which per-vertex Z-flipping could
+//! not do.
 
 const std = @import("std");
 const zmesh = @import("zmesh");
@@ -50,7 +54,19 @@ fn rhToLh() Matrix {
     return zm.scaling(1, 1, -1);
 }
 
-const flipIndices = false;
+/// `world` already includes the RH→LH root mirror. A conventional glTF node
+/// therefore has a negative determinant and keeps its authored indices; an
+/// additional source mirror changes the parity back and needs a local swap.
+fn needsIndexFlip(world_determinant: f32) bool {
+    return world_determinant > 0.0;
+}
+
+test "gltf winding only flips for an additional source mirror" {
+    // F = diag(1, 1, -1) makes an ordinary source transform negative.
+    try std.testing.expect(!needsIndexFlip(-1.0));
+    // One negative source scale multiplies the root mirror back to positive.
+    try std.testing.expect(needsIndexFlip(1.0));
+}
 
 // ===========================================================================
 //  Public API
@@ -242,6 +258,7 @@ fn emitPrimitive(b: *Builder, prim: *c.Primitive, world: Matrix) !void {
     const normal_mat = zm.transpose(zm.inverse(world));
     const det = zm.determinant(world)[0];
     const w_sign: f32 = if (det < 0) -1 else 1;
+    const flip_winding = needsIndexFlip(det);
 
     const verts = try b.allocator.alloc(Vertex3D, vcount);
     defer b.allocator.free(verts);
@@ -273,39 +290,40 @@ fn emitPrimitive(b: *Builder, prim: *c.Primitive, world: Matrix) !void {
         };
     }
 
-    try appendMesh(b, prim, verts, vcount, tang_acc == null);
+    try appendMesh(b, prim, verts, vcount, tang_acc == null, flip_winding);
 }
 
-fn appendMesh(b: *Builder, prim: *c.Primitive, verts: []Vertex3D, vcount: usize, compute_tan: bool) !void {
+fn appendMesh(b: *Builder, prim: *c.Primitive, verts: []Vertex3D, vcount: usize, compute_tan: bool, flip_winding: bool) !void {
     const use_u16 = vcount <= 65536;
     if (prim.indices) |indices| {
         const icount = indices.count;
         if (use_u16) {
             const inds = try b.allocator.alloc(u16, icount);
             defer b.allocator.free(inds);
-            readIndicesFlipped(u16, indices, inds);
+            readIndices(u16, indices, inds, flip_winding);
             if (compute_tan) computeTangents(verts, u16, inds);
             try pushPrim(b, prim, verts, .{ .u16 = inds });
         } else {
             const inds = try b.allocator.alloc(u32, icount);
             defer b.allocator.free(inds);
-            readIndicesFlipped(u32, indices, inds);
+            readIndices(u32, indices, inds, flip_winding);
             if (compute_tan) computeTangents(verts, u32, inds);
             try pushPrim(b, prim, verts, .{ .u32 = inds });
         }
     } else {
-        // Non-indexed: build a flipped index list (0,2,1, 3,5,4, ...).
+        // Non-indexed: synthesize indices, swapping only an exceptionally
+        // mirrored source node so it follows the engine's winding convention.
         const icount = vcount;
         if (use_u16) {
             const inds = try b.allocator.alloc(u16, icount);
             defer b.allocator.free(inds);
-            fillFlippedSeq(u16, inds);
+            fillSequentialIndices(u16, inds, flip_winding);
             if (compute_tan) computeTangents(verts, u16, inds);
             try pushPrim(b, prim, verts, .{ .u16 = inds });
         } else {
             const inds = try b.allocator.alloc(u32, icount);
             defer b.allocator.free(inds);
-            fillFlippedSeq(u32, inds);
+            fillSequentialIndices(u32, inds, flip_winding);
             if (compute_tan) computeTangents(verts, u32, inds);
             try pushPrim(b, prim, verts, .{ .u32 = inds });
         }
@@ -321,12 +339,12 @@ fn pushPrim(b: *Builder, prim: *c.Primitive, verts: []Vertex3D, idx: graphics.In
     try b.mapping.append(b.allocator, slot);
 }
 
-/// Read indices, reversing each triangle's winding (2nd/3rd swapped) to
-/// compensate for the RH→LH mirror.
-fn readIndicesFlipped(comptime I: type, acc: *c.Accessor, out: []I) void {
+/// Read glTF indices unchanged for ordinary nodes. A source node whose local
+/// transform mirrors its geometry is the only case that needs a 2nd/3rd swap.
+fn readIndices(comptime I: type, acc: *c.Accessor, out: []I, flip_winding: bool) void {
     var k: usize = 0;
     while (k + 2 < acc.count + 1 and k + 2 < out.len) : (k += 3) {
-        if (comptime flipIndices) {
+        if (flip_winding) {
             out[k + 0] = @intCast(acc.readIndex(k + 0));
             out[k + 1] = @intCast(acc.readIndex(k + 2));
             out[k + 2] = @intCast(acc.readIndex(k + 1));
@@ -338,10 +356,10 @@ fn readIndicesFlipped(comptime I: type, acc: *c.Accessor, out: []I) void {
     }
 }
 
-fn fillFlippedSeq(comptime I: type, out: []I) void {
+fn fillSequentialIndices(comptime I: type, out: []I, flip_winding: bool) void {
     var k: usize = 0;
     while (k + 2 < out.len + 1 and k + 2 < out.len) : (k += 3) {
-        if (comptime flipIndices) {
+        if (flip_winding) {
             out[k + 0] = @intCast(k + 0);
             out[k + 1] = @intCast(k + 2);
             out[k + 2] = @intCast(k + 1);

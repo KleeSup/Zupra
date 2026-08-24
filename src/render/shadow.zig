@@ -273,6 +273,9 @@ pub const ShadowAtlas = struct {
         return self.allocateWithLifetime(tile_size, .persistent);
     }
 
+    /// Release a tile immediately. Persistent tiles normally use this on cache
+    /// eviction; transient tiles may use it to roll back a failed multi-tile
+    /// allocation in the current frame.
     pub fn freeTile(self: *ShadowAtlas, handle: atlas_alloc.Handle) void {
         self.tiles.free(handle);
     }
@@ -319,19 +322,16 @@ pub const ShadowAtlas = struct {
         return .{ .action = action, .attachments = att };
     }
 
-    /// A pass that preserves the atlas depth. The basis for caching: tiles that
-    /// are still valid are simply not touched, and tiles that need rebuilding
-    /// clear themselves through clearTile below.
+    /// A pass that preserves atlas depth. The basis for caching: tiles that are
+    /// still valid are simply not touched; the renderer draws a depth=1
+    /// fullscreen triangle under the dirty tile's viewport/scissor before it
+    /// redraws that tile's casters.
     pub fn loadPass(self: ShadowAtlas) sg.Pass {
         return self.casterPass();
     }
 
-    /// Clear one tile to far depth by drawing over it with a viewport.
-    ///
-    /// Sokol clears whole attachments, not regions, so a per-tile clear has to
-    /// be a draw. This is why the depth pipeline used for it has to write depth
-    /// unconditionally: a full-tile quad at z = 1 with compare ALWAYS, which
-    /// costs one quad rather than the geometry the tile used to hold.
+    /// Convert a tile to a viewport/scissor rectangle. Kept as a small utility
+    /// for callers that need to address an atlas region explicitly.
     pub fn tileViewport(tile: Tile, origin_top_left: bool) struct { x: i32, y: i32, w: i32, h: i32, top_left: bool } {
         return .{
             .x = @intCast(tile.x),
