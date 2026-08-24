@@ -247,7 +247,7 @@ pub const SceneRenderer = struct {
         // opaque, and both modes use it to forward-shade transparents.
         self.forward = MeshRenderer.init(cache);
         self.prepass = DepthPrepass.init(cache);
-        self.ssao = XGtao.init(cache, width, height, .{ .mip_offset = 20 });
+        self.ssao = XGtao.init(cache, width, height, .{});
         if (mode == .deferred) {
             self.gbuffer = GBuffer.init(width, height);
             self.geo = GeometryRenderer.init(cache);

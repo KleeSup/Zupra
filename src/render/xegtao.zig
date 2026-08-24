@@ -115,7 +115,7 @@ pub const Settings = struct {
     steps: u32 = 3,
     /// Bias on the mip chosen per sample. Negative reads finer levels, which is
     /// sharper and slower; positive reads coarser, which is faster and blurrier.
-    mip_offset: f32 = 3.3,
+    mip_offset: f32 = 3.15,
     /// Vary probe directions per frame so a temporal filter can converge them.
     /// On without TAA this shimmers rather than converging, so it should follow
     /// whether TAA is actually running.

@@ -264,7 +264,7 @@ float sampleShadow(int shadow_index, int cascade, vec3 world_pos, float ndotl) {
     float depth_ref = proj.z; // sokol [0,1] clip depth
 
     // Past the far plane there is no data for any light type.
-    if (depth_ref > 1.0) return 0.0;
+    if (depth_ref > 1.0) return 1.0;
 
     // Outside the frustum -> lit, but ONLY for light types that have an
     // outside. A spot's cone and a cascade's box both end somewhere, and beyond

@@ -125,7 +125,7 @@ pub fn main(ctx: std.process.Init) !void {
 pub fn init() void {
     gpa = zupra.getGPA();
     cache = .init(gpa);
-    scene = zupra.render.SceneRenderer.init(gpa, &cache, .forward, 1280, 720) catch unreachable;
+    scene = zupra.render.SceneRenderer.init(gpa, &cache, .deferred, 1280, 720) catch unreachable;
     scene.setAAMethod(.taa);
 
     cam = zupra.render.Camera3D.init(16.0 / 9.0);
@@ -152,8 +152,8 @@ pub fn init() void {
     lamp_light = env.addLight(Light.point(
         .{ .x = 0, .y = 5.0, .z = 0 },
         .{ .r = 1.0, .g = 0.85, .b = 0.55, .a = 1 },
-        90.0,
         5.0,
+        18.0,
     )) catch unreachable;
     if (env.getLight(lamp_light)) |l| {
         l.shadow = .{ .enabled = true, .resolution = 512, .cascade_count = 1, .max_distance = 60 };
