@@ -85,8 +85,13 @@ float sampleDepthMip(vec2 uv, float mip) {
     // parity and the level always agree (flooring kept noisy mip 0 active for
     // too much of the search radius).
     float m = floor(mip + 0.5);
-    if (mod(m, 2.0) < 0.5) return textureLod(sampler2D(tex_depth_even, smp), uv, m).r;
-    return textureLod(sampler2D(tex_depth_odd, smp), uv, m).r;
+    float depth = 0.0;
+    if (mod(m, 2.0) < 0.5) {
+        depth = textureLod(sampler2D(tex_depth_even, smp), uv, m).r;
+    } else {
+        depth = textureLod(sampler2D(tex_depth_odd, smp), uv, m).r;
+    }
+    return depth;
 }
 
 // Screen uv plus view depth -> view-space position.
@@ -243,7 +248,7 @@ void main() {
             float s = (step + step_noise) / steps_per_slice;
             // Dense near the pixel, sparse further out: occlusion detail lives
             // close to the surface.
-            s = pow(s, sample_distribution_power);
+            s = pow(max(s, 0.0), sample_distribution_power);
             s += min_s;
 
             vec2 sample_offset = s * omega;
