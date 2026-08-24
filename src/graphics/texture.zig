@@ -43,6 +43,56 @@ pub const Texture = struct {
         return Texture.init(img, @intCast(desc.width), @intCast(desc.height), .RGBA8);
     }
 
+    /// Load an encoded 8-bit image and upload every supported mip level.
+    ///
+    /// This is the path for material images, especially glTF assets: their
+    /// samplers commonly request a mipmapped minification filter, while sokol
+    /// immutable images require every mip to be supplied at creation time.
+    /// The temporary levels are CPU-generated with stb_image_resize and freed
+    /// after `makeImage`, which copies them into GPU-owned storage.
+    pub fn initBufferMipmapped(buffer: []const u8) !Texture {
+        // Sokol's ImageData currently exposes 16 mip slots. Keep the temporary
+        // storage in lockstep with that limit, rather than allocating per level.
+        var mip_images: [16]zstbi.Image = undefined;
+        mip_images[0] = try zstbi.Image.loadFromMemory(buffer, 4);
+        var mip_count: usize = 1;
+        defer {
+            for (mip_images[0..mip_count]) |*mip| mip.deinit();
+        }
+
+        // `Image.resize` uses stb_image_resize's 8-bit path. glTF's core PNG
+        // and JPEG material images are 8-bit; reject formats this path cannot
+        // resize correctly instead of silently uploading malformed mip data.
+        if (mip_images[0].bytes_per_component != 1) return error.UnsupportedMipFormat;
+
+        while (mip_count < mip_images.len) {
+            const previous = &mip_images[mip_count - 1];
+            if (previous.width == 1 and previous.height == 1) break;
+
+            // Standard texture mip dimensions are floor(previous / 2), clamped
+            // to one texel. This matches the dimensions sokol validates for an
+            // immutable mip chain, including non-power-of-two source images.
+            const next_width = @max(1, previous.width / 2);
+            const next_height = @max(1, previous.height / 2);
+            mip_images[mip_count] = previous.resize(next_width, next_height);
+            mip_count += 1;
+        }
+
+        var desc = sg.ImageDesc{
+            .width = @intCast(mip_images[0].width),
+            .height = @intCast(mip_images[0].height),
+            .num_mipmaps = @intCast(mip_count),
+            .pixel_format = .RGBA8,
+            .usage = .{ .immutable = true },
+        };
+        for (mip_images[0..mip_count], 0..) |mip, level| {
+            desc.data.mip_levels[level] = .{ .ptr = mip.data.ptr, .size = mip.data.len };
+        }
+
+        const img = sg.makeImage(desc);
+        return Texture.init(img, @intCast(desc.width), @intCast(desc.height), .RGBA8);
+    }
+
     /// Build an immutable texture from raw RGBA8 pixels.
     pub fn initRaw(pixels: []const u8, width: u32, height: u32) Texture {
         var desc = sg.ImageDesc{

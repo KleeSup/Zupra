@@ -64,10 +64,10 @@ pub const Camera3D = struct {
         return p;
     }
 
-    /// The projection without the jitter. The jitter is
-    /// a rendering offset, not part of where a surface actually is, and feeding
-    /// the jittered matrix to TAA makes the history chase the jitter sequence
-    /// instead of the camera (which is why it needs Reprojection).
+    /// The projection without the jitter, for systems that explicitly operate
+    /// in stable camera coordinates. TAA's depth reprojection instead pairs
+    /// the current and previous jittered matrices, matching the projections
+    /// that rasterized its colour and depth inputs.
     pub fn unjitteredViewProjection(self: Camera3D) Matrix {
         var c = self;
         c.jitter = .{ 0, 0 };

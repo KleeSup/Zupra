@@ -365,6 +365,16 @@ pub const SceneRenderer = struct {
         return self.post.aa == .taa;
     }
 
+    /// Enable or disable screen-space ambient occlusion. This changes the HDR
+    /// image before TAA, so its existing colour history no longer describes the
+    /// same signal; discard it rather than fading an old AO pattern out over
+    /// several frames.
+    pub fn setSsaoEnabled(self: *SceneRenderer, enabled: bool) void {
+        if (self.ssao_enabled == enabled) return;
+        self.ssao_enabled = enabled;
+        self.taa.resetHistory();
+    }
+
     pub fn begin(self: *SceneRenderer, camera: Camera3D, env: *Environment) void {
         const w: u32 = @intFromFloat(sapp.widthf());
         const h: u32 = @intFromFloat(sapp.heightf());
@@ -729,7 +739,7 @@ pub const SceneRenderer = struct {
                 hdr,
                 self.opaqueDepthSampleView(),
                 if (self.velocity.any_drawn) self.velocity.velocityView() else null,
-                self.camera.viewProjection(),
+                self.camera,
             );
         }
         if (self.bloom_enabled) hdr = self.bloom.render(hdr);

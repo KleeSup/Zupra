@@ -543,7 +543,7 @@ fn loadTexView(b: *Builder, view: c.TextureView) !?Texture {
         if (image.buffer_view) |bv| {
             if (bv.buffer.data) |ptr| {
                 const raw: [*]const u8 = @ptrCast(ptr);
-                break :blk Texture.initBuffer(raw[bv.offset .. bv.offset + bv.size]) catch null;
+                break :blk Texture.initBufferMipmapped(raw[bv.offset .. bv.offset + bv.size]) catch null;
             }
         }
         if (image.uri) |uri_c| {
@@ -553,7 +553,7 @@ fn loadTexView(b: *Builder, view: c.TextureView) !?Texture {
                 defer b.allocator.free(full);
                 const bytes = readWholeFile(b.allocator, full) catch break :blk null;
                 defer b.allocator.free(bytes);
-                break :blk Texture.initBuffer(bytes) catch null;
+                break :blk Texture.initBufferMipmapped(bytes) catch null;
             }
         }
         break :blk null;

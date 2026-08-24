@@ -23,9 +23,10 @@
 //! same architectural question the culling notes raise, reached from a different
 //! direction.
 //!
-//! THE JITTER IS SUBTRACTED BACK OUT for reprojection. The matrices handed to the
-//! resolve must be UNJITTERED, or every frame's offset would be baked into the
-//! reprojection and the history would chase its own tail.
+//! DEPTH AND COLOUR ARE RASTERIZED WITH THE JITTERED PROJECTION. Reprojection
+//! therefore pairs the inverse current jittered matrix with the previous
+//! jittered matrix. An unjittered formulation is equivalent only if the shader
+//! explicitly removes the current and previous jitter offsets itself.
 
 const std = @import("std");
 const sg = @import("sokol").gfx;
@@ -51,6 +52,7 @@ const TaaParams = extern struct {
     prev_view_proj: [16]f32,
     params: [4]f32, // 1/w, 1/h, blend weight, origin_top_left
     flags: [4]f32, // reset, variance gamma, history sharpening, velocity bound
+    depth_params: [4]f32, // raw depth -> view depth A/B, relative history tolerance, unused
 };
 
 pub const Settings = struct {
@@ -91,13 +93,29 @@ pub const Settings = struct {
     /// along silhouettes against darker backgrounds. Partial strength keeps most
     /// of the sharpness with the accumulation staying below visibility. Raise it
     /// if the image feels soft; lower it if edges start to glow.
-    history_sharpening: f32 = 0.4,
+    // Most temporal reprojections are fractional. Keeping this near one avoids
+    // applying a bilinear low-pass to the entire history every frame; 0.8 keeps
+    // a small damping margin against Catmull-Rom feedback ringing.
+    history_sharpening: f32 = 0.8,
+    /// Reject a reprojected history sample when its recorded view-space depth
+    /// differs from the surface now at that location by more than this fraction.
+    ///
+    /// Colour clipping cannot reliably distinguish a dark AO/shadow sample from
+    /// a different surface with a similar colour. Carrying linear depth in the
+    /// unused history alpha channel closes that gap and prevents it from being
+    /// blended across depth discontinuities.
+    history_depth_tolerance: f32 = 0.02,
 };
 
 pub const Taa = struct {
     cache: *PipelineCache,
     shader: sg.Shader,
+    /// Linear history sampling supports fractional reprojection and Catmull-Rom
+    /// reconstruction. It must never be used for depth or velocity.
     sampler: sg.Sampler,
+    /// Depth, history depth, and velocity describe discrete surfaces/vectors;
+    /// filtering between adjacent pixels makes a false surface at silhouettes.
+    point_sampler: sg.Sampler,
     vbuf: sg.Buffer,
 
     /// Two histories, ping-ponged: a resolve reads one and writes the other,
@@ -106,7 +124,8 @@ pub const Taa = struct {
     /// Which history holds the PREVIOUS frame's result.
     read_index: u32 = 0,
 
-    /// Last frame's unjittered view-projection, for reprojection.
+    /// Last frame's jittered view-projection, matching the depth buffer and the
+    /// rasterized colour held in history.
     prev_view_proj: Matrix = undefined,
     /// Set whenever the history is meaningless: first frame, after a resize, or
     /// after the caller reports a cut. Without it, frame one blends against an
@@ -141,6 +160,12 @@ pub const Taa = struct {
                 .wrap_u = .CLAMP_TO_EDGE,
                 .wrap_v = .CLAMP_TO_EDGE,
             }),
+            .point_sampler = sg.makeSampler(.{
+                .min_filter = .NEAREST,
+                .mag_filter = .NEAREST,
+                .wrap_u = .CLAMP_TO_EDGE,
+                .wrap_v = .CLAMP_TO_EDGE,
+            }),
             .vbuf = sg.makeBuffer(.{ .data = sg.asRange(&verts) }),
             .settings = settings,
             .prev_view_proj = zm.identity(),
@@ -152,6 +177,7 @@ pub const Taa = struct {
     pub fn deinit(self: *Taa) void {
         for (&self.history) |*h| h.deinit();
         sg.destroyBuffer(self.vbuf);
+        sg.destroySampler(self.point_sampler);
         sg.destroySampler(self.sampler);
         sg.destroyShader(self.shader);
     }
@@ -206,9 +232,9 @@ pub const Taa = struct {
 
     /// Resolve `color` against the history and return the accumulated result.
     ///
-    /// `view_proj` must be UNJITTERED -- the jitter is a rendering offset, not
-    /// part of where the surface actually is, and feeding it in here would make
-    /// the reprojection chase the jitter sequence instead of the camera.
+    /// `camera` includes this frame's projection jitter. Depth was rasterized
+    /// with that same projection, so its inverse and the previous jittered
+    /// projection must be paired for reprojection.
     /// `velocity_view` carries per-object motion where it exists and zero
     /// elsewhere. Pass null to fall back to camera reprojection everywhere,
     /// which is correct for a scene with no moving geometry.
@@ -217,8 +243,9 @@ pub const Taa = struct {
         color: Texture,
         depth_view: sg.View,
         velocity_view: ?sg.View,
-        view_proj: Matrix,
+        camera: Camera3D,
     ) Texture {
+        const view_proj = camera.viewProjection();
         const write_index = 1 - self.read_index;
         const dst = self.history[write_index];
 
@@ -238,6 +265,11 @@ pub const Taa = struct {
             return color;
         };
 
+        // perspectiveFovLh produces raw_depth = A + B / view_z. Store the
+        // resulting view-space depth in history alpha, where it can validate
+        // the reprojected RGB history without another render target.
+        const depth_a = camera.far / (camera.far - camera.near);
+        const depth_b = -camera.near * camera.far / (camera.far - camera.near);
         var params = TaaParams{
             .inv_view_proj = @bitCast(zm.inverse(view_proj)),
             .prev_view_proj = @bitCast(self.prev_view_proj),
@@ -252,6 +284,12 @@ pub const Taa = struct {
                 self.settings.variance_gamma,
                 self.settings.history_sharpening,
                 if (velocity_view != null) 1.0 else 0.0,
+            },
+            .depth_params = .{
+                depth_a,
+                depth_b,
+                std.math.clamp(self.settings.history_depth_tolerance, 0.0001, 1.0),
+                0,
             },
         };
 
@@ -268,6 +306,7 @@ pub const Taa = struct {
             // flag above gates the read.
             bindings.views[shd.VIEW_tex_velocity] = velocity_view orelse depth_view;
             bindings.samplers[shd.SMP_smp] = self.sampler;
+            bindings.samplers[shd.SMP_smp_point] = self.point_sampler;
 
             sg.applyPipeline(pip);
             sg.applyBindings(bindings);

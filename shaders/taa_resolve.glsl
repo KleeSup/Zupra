@@ -56,9 +56,9 @@ void main() {
 
 @fs fs
 layout(binding=0) uniform taa_params {
-    // Current inverse view-projection, UNJITTERED.
+    // Current inverse view-projection, including the rasterization jitter.
     mat4 inv_view_proj;
-    // Previous frame's view-projection, also unjittered.
+    // Previous frame's jittered view-projection.
     mat4 prev_view_proj;
     // xy = 1 / target size, z = blend weight for the current frame,
     // w = 1 when the render target reads top-left first.
@@ -66,6 +66,9 @@ layout(binding=0) uniform taa_params {
     // x = 1 to reset history, y = variance clipping gamma,
     // z = history sharpening 0..1, w = 1 when a velocity buffer is bound.
     vec4 flags;
+    // x/y convert raw hardware depth to view-space depth via B / (z - A).
+    // z is the relative depth tolerance for static-history validation.
+    vec4 depth_params;
 };
 
 layout(binding=0) uniform texture2D tex_color;
@@ -73,6 +76,7 @@ layout(binding=1) uniform texture2D tex_history;
 layout(binding=2) uniform texture2D tex_depth;
 layout(binding=3) uniform texture2D tex_velocity;
 layout(binding=0) uniform sampler smp;
+layout(binding=1) uniform sampler smp_point;
 
 in vec2 v_uv;
 in vec2 v_ndc;
@@ -118,6 +122,10 @@ vec3 clipToBox(vec3 box_min, vec3 box_max, vec3 history) {
 
 vec3 historyTap(vec2 uv) {
     return textureLod(sampler2D(tex_history, smp), uv, 0.0).rgb;
+}
+
+float historyDepthTap(vec2 uv) {
+    return textureLod(sampler2D(tex_history, smp_point), uv, 0.0).a;
 }
 
 // Five-tap Catmull-Rom. The full kernel is 4x4; collapsing each axis' middle
@@ -189,9 +197,11 @@ vec3 sampleHistoryCatmullRom(vec2 uv, vec2 texel) {
 
 void main() {
     vec3 current = textureLod(sampler2D(tex_color, smp), v_uv, 0.0).rgb;
+    float raw_depth = textureLod(sampler2D(tex_depth, smp_point), v_uv, 0.0).r;
+    float view_depth = depth_params.y / (raw_depth - depth_params.x);
 
     if (flags.x > 0.5) {
-        frag_color = vec4(current, 1.0);
+        frag_color = vec4(current, view_depth);
         return;
     }
 
@@ -223,7 +233,6 @@ void main() {
     // would be, and it keeps the control flow flat. Early returns nested inside
     // conditionals are exactly what SPIRV-Cross restructures badly on the HLSL
     // path.
-    float raw_depth = textureLod(sampler2D(tex_depth, smp), v_uv, 0.0).r;
     vec4 world_h = inv_view_proj * vec4(v_ndc, raw_depth, 1.0);
     vec3 world = world_h.xyz / world_h.w;
     vec4 prev_clip = prev_view_proj * vec4(world, 1.0);
@@ -236,19 +245,33 @@ void main() {
 
     vec2 velocity = vec2(0.0);
     if (flags.w > 0.5) {
-        velocity = textureLod(sampler2D(tex_velocity, smp), v_uv, 0.0).rg;
+        velocity = textureLod(sampler2D(tex_velocity, smp_point), v_uv, 0.0).rg;
     }
     bool has_velocity = dot(velocity, velocity) > 1e-12;
 
     vec2 prev_uv = has_velocity ? (v_uv + velocity) : camera_uv;
 
+    // RGB similarity alone cannot tell whether a history sample belongs to the
+    // same surface. This is especially harmful for dark AO and shadowed areas:
+    // a stale dark sample can easily fit the current colour neighbourhood and
+    // then blur/flood across an edge. History alpha carries the prior frame's
+    // view-space depth, while `prev_clip.w` is this static surface's expected
+    // view-space depth in that frame (perspectiveFovLh writes view z to w).
+    // Moving objects use their velocity vector instead; their expected previous
+    // depth cannot be recovered from camera reprojection alone.
+    float expected_prev_depth = prev_clip.w;
+    float recorded_prev_depth = historyDepthTap(prev_uv);
+    float depth_tolerance = max(0.01, abs(expected_prev_depth) * depth_params.z);
+    bool depth_valid = abs(recorded_prev_depth - expected_prev_depth) <= depth_tolerance;
+
     // No history where the camera reprojection was invalid and nothing recorded
     // a velocity, or where the surface was off screen last frame.
     bool usable = (has_velocity || camera_valid)
+        && (has_velocity || depth_valid)
         && prev_uv.x >= 0.0 && prev_uv.x <= 1.0
         && prev_uv.y >= 0.0 && prev_uv.y <= 1.0;
     if (!usable) {
-        frag_color = vec4(current, 1.0);
+        frag_color = vec4(current, view_depth);
         return;
     }
 
@@ -274,7 +297,7 @@ void main() {
 
     vec3 a = tonemapWeight(current);
     vec3 b = tonemapWeight(history);
-    frag_color = vec4(tonemapUnweight(mix(b, a, params.z)), 1.0);
+    frag_color = vec4(tonemapUnweight(mix(b, a, params.z)), view_depth);
 }
 @end
 

@@ -80,8 +80,11 @@ float fastACos(float inX) {
 }
 
 float sampleDepthMip(vec2 uv, float mip) {
-    // Floored so the parity test and the level sampled always agree.
-    float m = floor(mip);
+    // `textureLod` with the reference point-mip sampler picks the nearest
+    // level for a fractional LOD. Round before choosing an image so the
+    // parity and the level always agree (flooring kept noisy mip 0 active for
+    // too much of the search radius).
+    float m = floor(mip + 0.5);
     if (mod(m, 2.0) < 0.5) return textureLod(sampler2D(tex_depth_even, smp), uv, m).r;
     return textureLod(sampler2D(tex_depth_odd, smp), uv, m).r;
 }
@@ -99,19 +102,36 @@ vec3 computeViewspacePosition(vec2 screen_pos, float viewspace_depth) {
     return ret;
 }
 
-// Spatial noise. The reference uses a Hilbert-curve R2 lookup table; this is the
-// same R2 sequence evaluated analytically, which avoids shipping a texture and
-// is decorrelated enough for the two values the algorithm needs.
-vec2 spatialDirectionalNoise(vec2 pix_coord, float frame) {
-    // R2: the generalised golden ratio in two dimensions.
-    float index = pix_coord.x * 3.0 + pix_coord.y * 7.0 + frame * 11.0;
-    float a = fract(index * 0.7548776662466927);
-    float b = fract(index * 0.5698402909980532);
-    // Interleaved gradient noise for the slice angle keeps neighbouring pixels
-    // probing different directions, which is what the denoiser relies on.
-    float ign = fract(52.9829189 * fract(0.06711056 * (pix_coord.x + frame * 5.588238)
-                                       + 0.00583715 * (pix_coord.y + frame * 5.588238)));
-    return vec2(ign, fract(a + b));
+// The reference XeGTAO ordering. A Hilbert curve gives neighbouring pixels
+// well-spaced values in the R2 sequence instead of placing an entire diagonal
+// on the same noise value. The old `3*x + 7*y` index repeated exactly along
+// (7, -3) diagonals, which is the screen-space hatching visible under TAA.
+uint hilbertIndex(uvec2 pos) {
+    const uint width = 64u;
+    uint index = 0u;
+    for (uint level = width / 2u; level > 0u; level /= 2u) {
+        uint region_x = (pos.x & level) > 0u ? 1u : 0u;
+        uint region_y = (pos.y & level) > 0u ? 1u : 0u;
+        index += level * level * ((3u * region_x) ^ region_y);
+        if (region_y == 0u) {
+            if (region_x == 1u) {
+                pos = (width - 1u) - pos;
+            }
+            pos = pos.yx;
+        }
+    }
+    return index;
+}
+
+// XeGTAO's Hilbert-driven R2 sequence. `temporal_index` is zero without TAA
+// and cycles through the reference's 64-frame sequence when TAA is active.
+vec2 spatialDirectionalNoise(uvec2 pix_coord, uint temporal_index) {
+    uint index = hilbertIndex(pix_coord);
+    index += 288u * (temporal_index % 64u);
+    return fract(0.5 + float(index) * vec2(
+        0.75487766624669276005,
+        0.56984029099805326591
+    ));
 }
 
 void main() {
@@ -171,8 +191,10 @@ void main() {
 
     float min_s = PIXEL_TOO_CLOSE_THRESHOLD / screenspace_radius;
 
-    vec2 local_noise = spatialDirectionalNoise(gl_FragCoord.xy,
-        (temporal.y > 0.5) ? temporal.x : 0.0);
+    vec2 local_noise = spatialDirectionalNoise(
+        uvec2(gl_FragCoord.xy),
+        (temporal.y > 0.5) ? uint(temporal.x) : 0u
+    );
     float noise_slice = local_noise.x;
     float noise_sample = local_noise.y;
 

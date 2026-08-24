@@ -285,10 +285,19 @@ pub fn render() void {
         scene.setAAMethod(if (scene.isTaaActive()) .none else .taa);
     }
     if (zupra.input.isKeyJustPressed(._2)) paused = !paused;
-    if (zupra.input.isKeyJustPressed(._3)) show_velocity = !show_velocity;
+    if (zupra.input.isKeyJustPressed(._3)) {
+        show_velocity = !show_velocity;
+        if (show_velocity) {
+            scene.setAAMethod(.fxaa);
+            //scene.setRenderScale(2);
+        } else {
+            scene.setAAMethod(.none);
+            scene.setRenderScale(1);
+        }
+    }
     if (zupra.input.isKeyJustPressed(._4)) slow = !slow;
     if (zupra.input.isKeyJustPressed(._5)) scene.bloom_enabled = !scene.bloom_enabled;
-    if (zupra.input.isKeyJustPressed(._6)) scene.ssao_enabled = !scene.ssao_enabled;
+    if (zupra.input.isKeyJustPressed(._6)) scene.setSsaoEnabled(!scene.ssao_enabled);
     if (zupra.input.isKeyJustPressed(._9)) render_ao = !render_ao;
 
     // Translation. Wraps at the ends of the track rather than reversing, so

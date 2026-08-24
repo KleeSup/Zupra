@@ -113,8 +113,9 @@ pub const Settings = struct {
     /// Steps per slice, each covering both directions. The pyramid means more
     /// steps buy finer detail rather than a longer reach.
     steps: u32 = 3,
-    /// Bias on the mip chosen per sample. Negative reads finer levels, which is
-    /// sharper and slower; positive reads coarser, which is faster and blurrier.
+    /// Bias subtracted from the mip chosen per sample. Negative values select
+    /// coarser levels (faster, blurrier); positive values select finer levels
+    /// (sharper, but more sensitive to temporal variance).
     mip_offset: f32 = 3.15,
     /// Vary probe directions per frame so a temporal filter can converge them.
     /// On without TAA this shimmers rather than converging, so it should follow
