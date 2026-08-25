@@ -154,6 +154,14 @@ pub fn build(b: *Build) !void {
     _ = shader_includes.addCopyFile(b.path("shaders/pbr_lib.glsl.inc"), "pbr_lib.glsl.inc");
 
     bakeBrdfLut(b, &target, compile_step);
+
+    // Keep the framework's pure renderer/asset tests runnable with the same
+    // module graph as the application. Direct `zig test src/...` invocations
+    // cannot resolve package imports such as sokol, zmesh and shaders.
+    const unit_tests = b.addTest(.{ .root_module = root_mod });
+    unit_tests.step.dependOn(&compile_step.step);
+    const run_unit_tests = b.addRunArtifact(unit_tests);
+    b.step("test", "Run Zupra unit tests").dependOn(&run_unit_tests.step);
 }
 
 fn buildNative(b: *Build, exe: *std.Build.Step.Compile) !void {

@@ -26,15 +26,14 @@
 //! one-off draws. Filament and Unreal both keep exactly this split.
 //!
 //! THREADING: single-threaded, like the rest of the renderer. Handles are
-//! indices into a dense array with a generation counter, so they stay valid
-//! across insertions and detect use-after-remove.
+//! stable slots with a generation counter, so they survive storage reallocation
+//! and detect use-after-remove.
 
 const std = @import("std");
 const math = @import("../math.zig");
 const culling = @import("culling.zig");
 const model_mod = @import("model.zig");
 const SceneRenderer = @import("scene.zig").SceneRenderer;
-const Camera3D = @import("camera3d.zig").Camera3D;
 
 const Matrix = math.Matrix;
 const Vec3 = math.Vec3;
@@ -44,11 +43,32 @@ const ModelInstance = model_mod.ModelInstance;
 const Sphere = culling.Sphere;
 const Frustum = culling.Frustum;
 
+/// A modest leaf size keeps the tree shallow without making a leaf's exact
+/// sphere tests expensive. The renderer still culls per-submesh later; this is
+/// only the retained-world broadphase.
+const bvh_leaf_size = 8;
+
+/// One node of the retained static-object hierarchy. Internal nodes own two
+/// child indices; leaves address a contiguous range in `bvh_indices`.
+const BvhNode = struct {
+    /// Deliberately a sphere rather than an AABB: it uses the same robust test
+    /// as SceneRenderer and remains conservative under arbitrary transforms.
+    bounds: Sphere = .empty,
+    first: u32 = 0,
+    count: u32 = 0,
+    left: u32 = 0,
+    right: u32 = 0,
+
+    fn isLeaf(self: BvhNode) bool {
+        return self.count != 0;
+    }
+};
+
 /// Stable reference to an object in the world.
 ///
-/// Index plus generation rather than a pointer: the entry array is dense and
-/// reorders on removal, so a pointer would dangle the moment anything else was
-/// removed. The generation makes a stale handle detectable instead of silently
+/// Index plus generation rather than a pointer: appending can reallocate the
+/// backing slot array, so callers must not retain internal object addresses.
+/// The generation makes a stale handle detectable instead of silently
 /// addressing whatever object took the slot.
 pub const Handle = struct {
     index: u32,
@@ -102,7 +122,36 @@ pub const Object = struct {
     /// caster invalidates every cached view that might contain it.
     dirty: bool = true,
 
+    /// Transient camera-query marker. A monotonically increasing stamp avoids
+    /// clearing a visible flag across every object before each BVH query, while
+    /// also ensuring a candidate can be submitted only once.
+    camera_query_stamp: u32 = 0,
+
     generation: u32 = 0,
+};
+
+/// Sorts an index range by the centre of its object's bounding sphere while a
+/// BVH subtree is built. Keeping indices (rather than Object values) means
+/// handles stay stable and the retained objects never move in memory.
+const BvhSortContext = struct {
+    objects: []const Object,
+    indices: []u32,
+    axis: u2,
+
+    pub fn lessThan(ctx: @This(), a: usize, b: usize) bool {
+        const a_index = ctx.indices[a];
+        const b_index = ctx.indices[b];
+        const av = axisComponent(ctx.objects[a_index].bounds.center, ctx.axis);
+        const bv = axisComponent(ctx.objects[b_index].bounds.center, ctx.axis);
+        if (av != bv) return av < bv;
+        // A deterministic tie break prevents all co-located props from
+        // depending on the sort's unspecified order.
+        return a_index < b_index;
+    }
+
+    pub fn swap(ctx: @This(), a: usize, b: usize) void {
+        std.mem.swap(u32, &ctx.indices[a], &ctx.indices[b]);
+    }
 };
 
 pub const Stats = struct {
@@ -117,13 +166,24 @@ pub const Stats = struct {
 
 pub const RenderWorld = struct {
     allocator: std.mem.Allocator,
-    objects: std.ArrayListUnmanaged(Object) = .empty,
+    objects: std.ArrayList(Object) = .empty,
     /// Free slots, so removal does not reorder live objects. Reordering would
     /// invalidate every handle pointing past the removed one.
-    free_list: std.ArrayListUnmanaged(u32) = .empty,
+    free_list: std.ArrayList(u32) = .empty,
     /// Bumped on every removal, so a handle to a reused slot fails the
     /// generation check rather than silently addressing its replacement.
     next_generation: u32 = 1,
+
+    /// Rebuild-on-mutation hierarchy for live, visible, stationary geometry.
+    /// Dynamic objects are intentionally excluded: rebuilding a static tree
+    /// every animation frame would be worse than their short linear walk.
+    bvh_nodes: std.ArrayList(BvhNode) = .empty,
+    bvh_indices: std.ArrayList(u32) = .empty,
+    /// Dynamic objects plus any object without a usable non-empty bound. This
+    /// list is rebuilt only when membership changes, never for dynamic motion.
+    linear_indices: std.ArrayList(u32) = .empty,
+    spatial_dirty: bool = true,
+    camera_query_stamp: u32 = 0,
 
     /// Set by every public mutation that can change the set or pose of shadow
     /// casters. Kept until submit() because SceneRenderer builds its shadow
@@ -139,6 +199,9 @@ pub const RenderWorld = struct {
     pub fn deinit(self: *RenderWorld) void {
         self.objects.deinit(self.allocator);
         self.free_list.deinit(self.allocator);
+        self.bvh_nodes.deinit(self.allocator);
+        self.bvh_indices.deinit(self.allocator);
+        self.linear_indices.deinit(self.allocator);
     }
 
     pub fn add(self: *RenderWorld, object: Object) !Handle {
@@ -150,19 +213,23 @@ pub const RenderWorld = struct {
         obj.prev_matrix = obj.matrix;
         obj.bounds = modelBounds(obj.model).transform(obj.matrix);
         obj.dirty = true;
+        // Query stamps are derived state, never caller-authored input. Reset
+        // it when reusing a slot so a stale stamp cannot make a new object look
+        // camera-visible before the next query marks it.
+        obj.camera_query_stamp = 0;
 
         if (self.free_list.pop()) |index| {
-            obj.generation = self.next_generation;
-            self.next_generation +%= 1;
+            obj.generation = self.takeGeneration();
             self.objects.items[index] = obj;
+            self.invalidateSpatialIndex();
             self.invalidateShadowCache();
             return .{ .index = index, .generation = obj.generation };
         }
 
-        obj.generation = self.next_generation;
-        self.next_generation +%= 1;
+        obj.generation = self.takeGeneration();
         const index: u32 = @intCast(self.objects.items.len);
         try self.objects.append(self.allocator, obj);
+        self.invalidateSpatialIndex();
         self.invalidateShadowCache();
         return .{ .index = index, .generation = obj.generation };
     }
@@ -174,11 +241,16 @@ pub const RenderWorld = struct {
         // nothing can resolve here until the slot is reused.
         obj.generation = 0;
         self.free_list.append(self.allocator, handle.index) catch {};
+        self.invalidateSpatialIndex();
         self.invalidateShadowCache();
     }
 
-    pub fn get(self: *const RenderWorld, handle: Handle) ?*const Object {
-        return self.resolve(handle);
+    /// Return a read-only snapshot of a live object. Keeping a pointer into
+    /// RenderWorld would be unsafe because a later add() can reallocate its
+    /// backing slot array; use the explicit mutators to change world state.
+    pub fn get(self: *const RenderWorld, handle: Handle) ?Object {
+        const obj = self.resolve(handle) orelse return null;
+        return obj.*;
     }
 
     /// Move an object. Marks it dirty, refits its bounds, and preserves its
@@ -196,6 +268,9 @@ pub const RenderWorld = struct {
         obj.matrix = composeMatrix(position, rotation, scale);
         obj.bounds = modelBounds(obj.model).transform(obj.matrix);
         obj.dirty = true;
+        // A dynamic object remains on the linear path, so its motion needs no
+        // tree rebuild. Static/stationary objects change BVH membership/bounds.
+        if (obj.mobility != .dynamic) self.invalidateSpatialIndex();
         self.invalidateShadowCache();
     }
 
@@ -208,6 +283,21 @@ pub const RenderWorld = struct {
         const obj = self.resolveMut(handle) orelse return;
         if (obj.visible == visible) return;
         obj.visible = visible;
+        self.invalidateSpatialIndex();
+        self.invalidateShadowCache();
+    }
+
+    /// Change the spatial/caching contract for an object. Use this rather than
+    /// modifying Object.mobility through an out-of-band copy: membership in
+    /// the retained BVH and the shadow-cache eligibility both depend on it.
+    pub fn setMobility(self: *RenderWorld, handle: Handle, mobility: Mobility) void {
+        const obj = self.resolveMut(handle) orelse return;
+        if (obj.mobility == mobility) return;
+        obj.mobility = mobility;
+        // Re-submit one moving frame so a policy change cannot accidentally
+        // reuse a cached tile or leave a stale velocity vector behind.
+        obj.dirty = true;
+        self.invalidateSpatialIndex();
         self.invalidateShadowCache();
     }
 
@@ -233,14 +323,23 @@ pub const RenderWorld = struct {
         self.shadow_cache_dirty = true;
     }
 
-    /// Cull against the camera and submit the survivors through the ordinary
-    /// immediate API.
+    /// Refit/rebuild the retained camera-culling index on the next submit.
+    ///
+    /// Call this if geometry bounds change outside the normal object mutators,
+    /// for example after replacing a model's mesh data in place. Pair it with
+    /// invalidateShadowCache() when the changed geometry casts shadows.
+    pub fn invalidateSpatialIndex(self: *RenderWorld) void {
+        self.spatial_dirty = true;
+    }
+
+    /// Query the retained hierarchy against the camera and submit the survivors
+    /// through the ordinary immediate API.
     ///
     /// This is the entire integration surface: everything below this line is a
     /// normal scene.draw(), so every renderer feature applies unchanged.
     ///
     /// Call between scene.begin() and scene.end().
-    pub fn submit(self: *RenderWorld, scene: *SceneRenderer, _: Camera3D) void {
+    pub fn submit(self: *RenderWorld, scene: *SceneRenderer) void {
         // SceneRenderer copies the caller's camera in begin(), fixes its
         // viewport, and applies this frame's TAA jitter. Match that exact
         // projection here: an unjittered broadphase could reject a surface
@@ -255,6 +354,21 @@ pub const RenderWorld = struct {
 
         self.stats = .{};
 
+        const query_stamp = self.nextCameraQueryStamp();
+        if (!scene.frustum_culling) {
+            // Respect SceneRenderer's diagnostic toggle exactly: disabling
+            // culling means every visible object takes the ordinary main path.
+            self.markAllCameraCandidates(frustum, false, query_stamp);
+        } else if (self.ensureSpatialIndex()) {
+            self.markBvhCandidates(frustum, query_stamp);
+            self.markLinearCandidates(frustum, query_stamp);
+        } else {
+            // Allocation failure during a rebuild is never allowed to make
+            // geometry disappear. Keep the dirty index for a later retry and
+            // use the original conservative linear query this frame.
+            self.markAllCameraCandidates(frustum, true, query_stamp);
+        }
+
         for (self.objects.items) |*obj| {
             if (obj.generation == 0) continue;
             self.stats.total += 1;
@@ -266,15 +380,13 @@ pub const RenderWorld = struct {
             inst.rotation = obj.rotation;
             inst.scale = obj.scale;
             inst.cast_shadows = obj.cast_shadows;
-            inst.shadow_cacheable = !obj.dirty;
+            // An idle .dynamic object must never enter a cached shadow tile:
+            // it may begin moving after the cache decision but before any
+            // caller reports another transform. Stationary/static objects can
+            // become cacheable after their one dirty frame has rendered.
+            inst.shadow_cacheable = shadowCacheable(obj);
 
-            // Empty bounds must follow SceneRenderer's conservative policy and
-            // stay visible: a loader bug should not make geometry silently
-            // disappear. Respect its debug culling toggle for the same reason.
-            const camera_visible = !scene.frustum_culling or
-                obj.bounds.isEmpty() or
-                frustum.intersectsSphere(obj.bounds);
-            if (!camera_visible) {
+            if (obj.camera_query_stamp != query_stamp) {
                 // Camera culling must never become shadow culling. A doorway,
                 // truck wheel or wall behind the camera can still cast into the
                 // visible part of a light volume, so enqueue its caster only.
@@ -302,6 +414,171 @@ pub const RenderWorld = struct {
         self.shadow_cache_dirty = false;
     }
 
+    /// Build a new index when the set of static/stationary visible objects
+    /// changed. The temporary arrays make this transactional: an out-of-memory
+    /// failure leaves the old arrays intact, but `spatial_dirty` prevents them
+    /// from being queried as if they described the new world.
+    fn rebuildSpatialIndex(self: *RenderWorld) !void {
+        var new_nodes: std.ArrayList(BvhNode) = .empty;
+        errdefer new_nodes.deinit(self.allocator);
+        var new_indices: std.ArrayList(u32) = .empty;
+        errdefer new_indices.deinit(self.allocator);
+        var new_linear: std.ArrayList(u32) = .empty;
+        errdefer new_linear.deinit(self.allocator);
+
+        for (self.objects.items, 0..) |*obj, i| {
+            if (obj.generation == 0 or !obj.visible) continue;
+            const index: u32 = @intCast(i);
+            if (isBvhObject(obj)) {
+                try new_indices.append(self.allocator, index);
+            } else {
+                // Dynamic and empty-bound objects retain the simple linear
+                // path. It has no refit cost when a dynamic transform changes.
+                try new_linear.append(self.allocator, index);
+            }
+        }
+
+        if (new_indices.items.len != 0) {
+            _ = try self.buildBvhNode(&new_nodes, &new_indices, 0, new_indices.items.len);
+        }
+
+        self.bvh_nodes.deinit(self.allocator);
+        self.bvh_indices.deinit(self.allocator);
+        self.linear_indices.deinit(self.allocator);
+        self.bvh_nodes = new_nodes;
+        self.bvh_indices = new_indices;
+        self.linear_indices = new_linear;
+        self.spatial_dirty = false;
+    }
+
+    fn ensureSpatialIndex(self: *RenderWorld) bool {
+        if (!self.spatial_dirty) return true;
+        self.rebuildSpatialIndex() catch return false;
+        return true;
+    }
+
+    fn buildBvhNode(
+        self: *const RenderWorld,
+        nodes: *std.ArrayList(BvhNode),
+        indices: *std.ArrayList(u32),
+        start: usize,
+        end: usize,
+    ) !u32 {
+        std.debug.assert(start < end);
+
+        var bounds: Sphere = .empty;
+        var min_center = self.objects.items[indices.items[start]].bounds.center;
+        var max_center = min_center;
+        for (indices.items[start..end]) |object_index| {
+            const object_bounds = self.objects.items[object_index].bounds;
+            bounds = Sphere.merge(bounds, object_bounds);
+            min_center.x = @min(min_center.x, object_bounds.center.x);
+            min_center.y = @min(min_center.y, object_bounds.center.y);
+            min_center.z = @min(min_center.z, object_bounds.center.z);
+            max_center.x = @max(max_center.x, object_bounds.center.x);
+            max_center.y = @max(max_center.y, object_bounds.center.y);
+            max_center.z = @max(max_center.z, object_bounds.center.z);
+        }
+
+        // Sphere.merge is mathematically conservative. Add a tiny padding to
+        // absorb f32 rounding so a broadphase reject can never hide a child on
+        // a frustum boundary. Each leaf still tests its exact object sphere.
+        bounds = padBvhBounds(bounds);
+
+        const node_index: u32 = @intCast(nodes.items.len);
+        try nodes.append(self.allocator, .{ .bounds = bounds });
+
+        const count = end - start;
+        if (count <= bvh_leaf_size) {
+            nodes.items[node_index] = .{
+                .bounds = bounds,
+                .first = @intCast(start),
+                .count = @intCast(count),
+            };
+            return node_index;
+        }
+
+        const axis = widestAxis(min_center, max_center);
+        std.sort.pdqContext(start, end, BvhSortContext{
+            .objects = self.objects.items,
+            .indices = indices.items,
+            .axis = axis,
+        });
+        const middle = start + count / 2;
+        const left = try self.buildBvhNode(nodes, indices, start, middle);
+        const right = try self.buildBvhNode(nodes, indices, middle, end);
+        nodes.items[node_index] = .{
+            .bounds = bounds,
+            .left = left,
+            .right = right,
+        };
+        return node_index;
+    }
+
+    fn nextCameraQueryStamp(self: *RenderWorld) u32 {
+        self.camera_query_stamp +%= 1;
+        if (self.camera_query_stamp == 0) {
+            // Stamps are only transient. Once the counter wraps, clear them
+            // once and resume at one; a 32-bit wrap is decades away in practice.
+            for (self.objects.items) |*obj| obj.camera_query_stamp = 0;
+            self.camera_query_stamp = 1;
+        }
+        return self.camera_query_stamp;
+    }
+
+    /// Generation zero marks a freed slot, so never hand it to a newly-added
+    /// object when the monotonically increasing counter wraps.
+    fn takeGeneration(self: *RenderWorld) u32 {
+        if (self.next_generation == 0) self.next_generation = 1;
+        const generation = self.next_generation;
+        self.next_generation +%= 1;
+        if (self.next_generation == 0) self.next_generation = 1;
+        return generation;
+    }
+
+    fn markAllCameraCandidates(self: *RenderWorld, frustum: Frustum, cull: bool, stamp: u32) void {
+        for (self.objects.items) |*obj| {
+            if (obj.generation == 0 or !obj.visible) continue;
+            if (!cull or cameraVisible(frustum, obj.bounds)) obj.camera_query_stamp = stamp;
+        }
+    }
+
+    fn markBvhCandidates(self: *RenderWorld, frustum: Frustum, stamp: u32) void {
+        if (self.bvh_nodes.items.len == 0) return;
+        self.markBvhNodeCandidates(0, frustum, stamp);
+    }
+
+    fn markBvhNodeCandidates(self: *RenderWorld, node_index: u32, frustum: Frustum, stamp: u32) void {
+        const node = self.bvh_nodes.items[node_index];
+        if (!frustum.intersectsSphere(node.bounds)) return;
+
+        if (node.isLeaf()) {
+            const first: usize = node.first;
+            const end = first + node.count;
+            for (self.bvh_indices.items[first..end]) |object_index| {
+                const obj = &self.objects.items[object_index];
+                // Test the original sphere at a leaf, not only the combined
+                // node sphere. This makes the BVH query exactly match the
+                // camera-frustum rule of the former linear implementation.
+                if (isBvhObject(obj) and cameraVisible(frustum, obj.bounds)) {
+                    obj.camera_query_stamp = stamp;
+                }
+            }
+            return;
+        }
+
+        self.markBvhNodeCandidates(node.left, frustum, stamp);
+        self.markBvhNodeCandidates(node.right, frustum, stamp);
+    }
+
+    fn markLinearCandidates(self: *RenderWorld, frustum: Frustum, stamp: u32) void {
+        for (self.linear_indices.items) |object_index| {
+            const obj = &self.objects.items[object_index];
+            if (obj.generation == 0 or !obj.visible or isBvhObject(obj)) continue;
+            if (cameraVisible(frustum, obj.bounds)) obj.camera_query_stamp = stamp;
+        }
+    }
+
     fn resolve(self: *const RenderWorld, handle: Handle) ?*const Object {
         if (!handle.isValid() or handle.index >= self.objects.items.len) return null;
         const obj = &self.objects.items[handle.index];
@@ -316,6 +593,53 @@ pub const RenderWorld = struct {
         return obj;
     }
 };
+
+/// Membership predicate for the static hierarchy. Visibility is included so a
+/// hidden object consumes neither a BVH leaf nor a linear camera query; toggles
+/// invalidate the index and rebuild it before the next culling pass.
+fn isBvhObject(obj: *const Object) bool {
+    return obj.generation != 0 and
+        obj.visible and
+        obj.mobility != .dynamic and
+        !obj.bounds.isEmpty();
+}
+
+/// Matches SceneRenderer.visible() for the bound-bearing objects that reach the
+/// retained query. Empty bounds must stay visible, because the renderer's
+/// established policy is to favour a harmless extra draw over disappearing
+/// geometry when an importer could not construct a bound.
+fn cameraVisible(frustum: Frustum, bounds: Sphere) bool {
+    return bounds.isEmpty() or frustum.intersectsSphere(bounds);
+}
+
+fn shadowCacheable(obj: *const Object) bool {
+    return obj.mobility != .dynamic and !obj.dirty;
+}
+
+fn axisComponent(v: Vec3, axis: u2) f32 {
+    return switch (axis) {
+        0 => v.x,
+        1 => v.y,
+        else => v.z,
+    };
+}
+
+fn widestAxis(min_center: Vec3, max_center: Vec3) u2 {
+    const x = max_center.x - min_center.x;
+    const y = max_center.y - min_center.y;
+    const z = max_center.z - min_center.z;
+    if (x >= y and x >= z) return 0;
+    if (y >= z) return 1;
+    return 2;
+}
+
+fn padBvhBounds(bounds: Sphere) Sphere {
+    if (bounds.isEmpty()) return bounds;
+    return .{
+        .center = bounds.center,
+        .radius = bounds.radius + @max(0.0001, bounds.radius * 0.0001),
+    };
+}
 
 /// Union of every submesh's object-space bounds.
 fn modelBounds(model: *const Model) Sphere {
@@ -374,4 +698,86 @@ test "RenderWorld marks the shadow cache dirty for caster mutations" {
     world.shadow_cache_dirty = false;
     world.remove(handle);
     try std.testing.expect(world.shadow_cache_dirty);
+}
+
+test "RenderWorld never allocates generation zero after counter wrap" {
+    var world = RenderWorld.init(std.testing.allocator);
+    defer world.deinit();
+
+    world.next_generation = std.math.maxInt(u32);
+    try std.testing.expectEqual(std.math.maxInt(u32), world.takeGeneration());
+    try std.testing.expectEqual(@as(u32, 1), world.takeGeneration());
+}
+
+test "RenderWorld resets caller-supplied derived query state on add" {
+    var world = RenderWorld.init(std.testing.allocator);
+    defer world.deinit();
+
+    var model = Model{
+        .meshes = &.{},
+        .materials = &.{},
+        .mesh_material = &.{},
+        .allocator = std.testing.allocator,
+    };
+
+    const handle = try world.add(.{
+        .model = &model,
+        .camera_query_stamp = 99,
+    });
+    const snapshot = world.get(handle) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 0), snapshot.camera_query_stamp);
+}
+
+test "RenderWorld BVH separates stationary bounds from dynamic and empty objects" {
+    var world = RenderWorld.init(std.testing.allocator);
+    defer world.deinit();
+
+    var model = Model{
+        .meshes = &.{},
+        .materials = &.{},
+        .mesh_material = &.{},
+        .allocator = std.testing.allocator,
+    };
+
+    const static_inside = try world.add(.{ .model = &model, .mobility = .static });
+    const stationary_outside = try world.add(.{ .model = &model, .mobility = .stationary });
+    const dynamic_inside = try world.add(.{ .model = &model, .mobility = .dynamic });
+    const static_empty = try world.add(.{ .model = &model, .mobility = .static });
+
+    // The empty test model lets this test set compact, pure synthetic world
+    // bounds without creating a GPU mesh. The last object stays empty by
+    // design, exercising the conservative linear path.
+    world.objects.items[static_inside.index].bounds = .{ .center = .{ .x = 0, .y = 0, .z = 0 }, .radius = 0.25 };
+    world.objects.items[stationary_outside.index].bounds = .{ .center = .{ .x = 10, .y = 0, .z = 0 }, .radius = 0.25 };
+    world.objects.items[dynamic_inside.index].bounds = .{ .center = .{ .x = 0.5, .y = 0, .z = 0 }, .radius = 0.25 };
+
+    try world.rebuildSpatialIndex();
+    try std.testing.expect(!world.spatial_dirty);
+    try std.testing.expectEqual(@as(usize, 2), world.bvh_indices.items.len);
+    try std.testing.expectEqual(@as(usize, 2), world.linear_indices.items.len);
+
+    // Axis-aligned cube [-2, 2] in the Frustum plane convention. The static
+    // and dynamic objects at the origin must survive; the stationary object at
+    // x=10 must not. Empty bounds remain visible by policy.
+    const frustum = Frustum{ .planes = .{
+        .{ 1, 0, 0, 2 },
+        .{ -1, 0, 0, 2 },
+        .{ 0, 1, 0, 2 },
+        .{ 0, -1, 0, 2 },
+        .{ 0, 0, 1, 2 },
+        .{ 0, 0, -1, 2 },
+    } };
+    const stamp = world.nextCameraQueryStamp();
+    world.markBvhCandidates(frustum, stamp);
+    world.markLinearCandidates(frustum, stamp);
+
+    try std.testing.expectEqual(stamp, world.objects.items[static_inside.index].camera_query_stamp);
+    try std.testing.expect(world.objects.items[stationary_outside.index].camera_query_stamp != stamp);
+    try std.testing.expectEqual(stamp, world.objects.items[dynamic_inside.index].camera_query_stamp);
+    try std.testing.expectEqual(stamp, world.objects.items[static_empty.index].camera_query_stamp);
+
+    world.objects.items[dynamic_inside.index].dirty = false;
+    world.objects.items[static_inside.index].dirty = false;
+    try std.testing.expect(!shadowCacheable(&world.objects.items[dynamic_inside.index]));
+    try std.testing.expect(shadowCacheable(&world.objects.items[static_inside.index]));
 }

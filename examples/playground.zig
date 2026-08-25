@@ -341,7 +341,7 @@ pub fn render() void {
     controller.applyTo(&cam);
 
     scene.begin(cam, &env);
-    world.submit(&scene, cam);
+    world.submit(&scene);
     scene.end();
 
     fps_accum += dt;

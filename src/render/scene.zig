@@ -187,6 +187,9 @@ pub const SceneRenderer = struct {
     shadows: ShadowRenderer,
     shadow_params: ShadowParams = undefined,
     shadow_queue: std.ArrayList(ShadowSubmission) = .empty,
+    /// Avoid repeating the O(light-count) cache invalidation when several
+    /// non-cacheable immediate submissions arrive in one frame.
+    shadow_cache_invalidated_this_frame: bool = false,
 
     // deferred-only
     gbuffer: GBuffer = undefined,
@@ -425,6 +428,7 @@ pub const SceneRenderer = struct {
         self.opaque_queue.clearRetainingCapacity();
         self.shadow_queue.clearRetainingCapacity();
         self.moved_queue.clearRetainingCapacity();
+        self.shadow_cache_invalidated_this_frame = false;
         self.shadow_draws = 0;
         self.shadow_instances = 0;
         self.submitted_draws = 0;
@@ -511,8 +515,14 @@ pub const SceneRenderer = struct {
     /// Invalidate persistent caster depth after begin() has already built the
     /// frame's shadow views. RenderWorld uses this when an observed caster
     /// changes; ShadowRenderer also clears its current-frame skip flags.
+    ///
+    /// This is idempotent within a frame. Non-cacheable immediate shadow
+    /// submissions call it automatically, so direct SceneRenderer users do not
+    /// accidentally reuse a tile that is missing a newly submitted caster.
     pub fn invalidateCachedShadowsThisFrame(self: *SceneRenderer) void {
+        if (self.shadow_cache_invalidated_this_frame) return;
         self.shadows.invalidateCacheThisFrame();
+        self.shadow_cache_invalidated_this_frame = true;
     }
 
     /// One shadow submission per submesh, each with its own world bounds.
@@ -526,6 +536,14 @@ pub const SceneRenderer = struct {
         // an object behind the camera can still cast a shadow into view, so it
         // is tested against each LIGHT's frustum instead, never this one.
         if (inst.cast_shadows) {
+            // `ShadowRenderer.build()` selects reusable tiles before draw()
+            // records this frame's casters. The default immediate instance has
+            // no retained-world versioning promise, so make cache reuse safe
+            // by invalidating those selected tiles before they can be skipped.
+            // RenderWorld sets this true only for clean static/stationary
+            // casters whose state it tracks.
+            if (!inst.shadow_cacheable) self.invalidateCachedShadowsThisFrame();
+
             for (inst.model.meshes, 0..) |submesh, i| {
                 const material = inst.model.materials[inst.model.mesh_material[i]];
                 // A blended surface has no stable binary coverage for a depth
@@ -946,4 +964,38 @@ fn packShadowParams(rend: *const ShadowRenderer) ShadowParams {
         p.sh_fade[li] = d.fade;
     }
     return p;
+}
+
+test "non-cacheable immediate shadow submissions invalidate selected cached views" {
+    // No GPU setup is needed: this exercises the CPU-side timing boundary
+    // between ShadowRenderer.build() selecting cached views and end() drawing
+    // the submissions recorded by SceneRenderer.
+    var scene: SceneRenderer = undefined;
+    scene.shadow_cache_invalidated_this_frame = false;
+    scene.shadows.shadow_cache = .empty;
+    defer scene.shadows.shadow_cache.deinit(std.testing.allocator);
+    scene.shadows.cached_view = .empty;
+    defer scene.shadows.cached_view.deinit(std.testing.allocator);
+    try scene.shadows.cached_view.append(std.testing.allocator, true);
+
+    var model = model_mod.Model{
+        .meshes = &.{},
+        .materials = &.{},
+        .mesh_material = &.{},
+        .allocator = std.testing.allocator,
+    };
+
+    scene.drawShadowOnly(model.instance());
+    try std.testing.expect(scene.shadow_cache_invalidated_this_frame);
+    try std.testing.expect(!scene.shadows.cached_view.items[0]);
+
+    // The explicit promise remains an opt-in path for a retained caller that
+    // genuinely knows its caster is unchanged.
+    scene.shadow_cache_invalidated_this_frame = false;
+    scene.shadows.cached_view.items[0] = true;
+    var cacheable = model.instance();
+    cacheable.shadow_cacheable = true;
+    scene.drawShadowOnly(cacheable);
+    try std.testing.expect(!scene.shadow_cache_invalidated_this_frame);
+    try std.testing.expect(scene.shadows.cached_view.items[0]);
 }

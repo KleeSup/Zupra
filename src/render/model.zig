@@ -152,6 +152,11 @@ pub const ModelInstance = struct {
     /// appears in the depth prepass. Only shadow SUBMISSION is skipped.
     cast_shadows: bool = true,
 
+    /// Promise that this caster's geometry, transform, and alpha coverage have
+    /// not changed since the cached shadow tile was rendered. The safe default
+    /// is false: SceneRenderer then invalidates cached shadow tiles for the
+    /// current frame. RenderWorld manages this automatically for retained
+    /// static/stationary objects; direct callers should normally leave it off.
     shadow_cacheable: bool = false,
 
     pub fn init(model: *const Model) ModelInstance {

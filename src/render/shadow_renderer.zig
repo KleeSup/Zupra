@@ -384,8 +384,9 @@ pub const ShadowRenderer = struct {
     ///
     /// A static light and a static camera do not imply a static shadow: an
     /// object entering or leaving a light's volume changes the depth while
-    /// nothing about the light changes. Until caster-scene versioning exists,
-    /// this is the caller's way to say so.
+    /// nothing about the light changes. RenderWorld reports those retained
+    /// mutations automatically; untracked immediate-mode removals or other
+    /// out-of-band changes must call this in their mutation frame.
     pub fn invalidateCache(self: *ShadowRenderer) void {
         for (self.shadow_cache.items) |*e| e.valid = false;
     }
