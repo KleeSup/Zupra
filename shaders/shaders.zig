@@ -34,6 +34,7 @@ pub const xegtao_denoise = @import("xegtao_denoise.glsl.zig");
 
 pub const shadow_depth = @import("shadow_depth.glsl.zig");
 pub const shadow_depth_instanced = @import("shadow_depth_instanced.glsl.zig");
+pub const shadow_depth_alpha = @import("shadow_depth_alpha.glsl.zig");
 pub const shadow_clear = @import("shadow_clear.glsl.zig");
 pub const depth_prepass = @import("depth_prepass.glsl.zig");
 

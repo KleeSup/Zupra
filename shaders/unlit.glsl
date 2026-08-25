@@ -13,6 +13,7 @@
 //------------------------------------------------------------------------------
 
 @include pbr_lib.glsl.inc
+@include material_alpha.glsl.inc
 
 @vs vs
 layout(binding=0) uniform vs_params {
@@ -43,6 +44,7 @@ layout(binding=0) uniform sampler smp_material;
 layout(binding=1) uniform fs_params {
     vec4 base_color;
     vec4 emissive; // rgb factor, w strength
+    vec4 alpha_params; // x cutoff, y = 1 for glTF alpha MASK
 };
 
 layout(binding=2) uniform uv_params {
@@ -55,15 +57,18 @@ in vec2 v_uv1;
 out vec4 frag_color;
 
 @include_block uv_transform
+@include_block material_alpha
 
 void main() {
     vec2 uv_bc = mapUv(UV_BASE_COLOR, v_uv, v_uv1);
     vec2 uv_em = mapUv(UV_EMISSIVE, v_uv, v_uv1);
 
-    vec3 tex = texture(sampler2D(base_color_map, smp_material), uv_bc).rgb;
-    vec3 albedo = base_color.rgb * pow(max(tex, vec3(0.0)), vec3(2.2));
+    vec4 base_sample = texture(sampler2D(base_color_map, smp_material), uv_bc);
+    float alpha = materialAlpha(base_color, base_sample);
+    discardMasked(alpha, alpha_params);
+    vec3 albedo = base_color.rgb * pow(max(base_sample.rgb, vec3(0.0)), vec3(2.2));
     vec3 em = emissive.rgb * emissive.w * texture(sampler2D(emissive_map, smp_material), uv_em).rgb;
-    frag_color = vec4(albedo + em, base_color.a);
+    frag_color = vec4(albedo + em, alpha);
 }
 @end
 

@@ -160,12 +160,10 @@ pub const Mesh = struct {
 ///
 /// Excluded, and why:
 ///   blend  - no single depth to record; drawn sorted, after everything.
-///   mask   - needs the fragment shader to discard, which a position-only pass
-///            can't do; cut-outs would be laid down as solid.
 ///   unlit / custom shader - may use a vertex layout other than .mesh, and the
 ///            prepass binds .mesh. A stride mismatch reads garbage.
 pub fn depthPrepassEligible(material: Material) bool {
-    if (material.alpha_mode != .opaque_) return false;
+    if (material.alpha_mode == .blend) return false;
     if (material.shader != null) return false;
     if (material.shading == .unlit) return false;
     return true;
@@ -324,6 +322,7 @@ pub const MeshRenderer = struct {
                     unlit_fs = .{
                         .base_color = .{ bc.r, bc.g, bc.b, bc.a },
                         .emissive = .{ emc.r, emc.g, emc.b, es },
+                        .alpha_params = material.alphaTestParams(),
                     };
                 },
                 .lambert => {
@@ -346,6 +345,7 @@ pub const MeshRenderer = struct {
                         .base_color = .{ bc.r, bc.g, bc.b, bc.a },
                         .material = .{ 0, 0, 0, if (material.normal_flip_y) -material.normal_scale else material.normal_scale },
                         .emissive = .{ emc.r, emc.g, emc.b, es },
+                        .alpha_params = material.alphaTestParams(),
                     };
                 },
                 .pbr => {
@@ -391,6 +391,7 @@ pub const MeshRenderer = struct {
                         .base_color = .{ bc.r, bc.g, bc.b, bc.a },
                         .material = .{ material.metallic, material.roughness, material.occlusion_strength, if (material.normal_flip_y) -material.normal_scale else material.normal_scale },
                         .emissive = .{ emc.r, emc.g, emc.b, es },
+                        .alpha_params = material.alphaTestParams(),
                     };
                 },
             }

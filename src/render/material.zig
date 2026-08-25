@@ -195,6 +195,14 @@ pub const Material = struct {
         };
     }
 
+    /// Parameters shared by every built-in material pass that can alpha-test a
+    /// glTF base-colour texture. `x` is the glTF cutoff and `y` is 1 only for
+    /// alpha-mask materials. Keeping the mode flag explicit matters because a
+    /// cutoff of 0 is valid and must not be mistaken for "testing disabled".
+    pub fn alphaTestParams(self: Material) [4]f32 {
+        return .{ self.alpha_cutoff, if (self.alpha_mode == .mask) 1.0 else 0.0, 0, 0 };
+    }
+
     // --- shader ---
 
     /// Upload parameters for the custom shader's fs_params block. Pass the

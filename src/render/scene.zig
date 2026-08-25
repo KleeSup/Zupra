@@ -112,19 +112,21 @@ const ShadowBatchKey = struct {
 /// One submesh queued for the shadow passes, with its world-space bounds fitted
 /// once at submission.
 ///
-/// Flattened to submeshes rather than kept as instances so the list can be
-/// sorted into contiguous runs of identical geometry, which is what lets each
-/// run become a single instanced draw. Fitting the bounds here also matters:
-/// the caster loop walks this list once per cascade and per cube face, so a
-/// bound computed in there would be recomputed a dozen times a frame for an
-/// object that never moved.
+/// Flattened to submeshes rather than kept as instances so opaque entries can
+/// be sorted into contiguous runs of identical geometry and become one
+/// instanced draw. Alpha masks retain their material here because their
+/// base-colour texture determines which fragments cast a shadow. Fitting the
+/// bounds here also matters: the caster loop walks this list once per cascade
+/// and per cube face, so a bound computed in there would be recomputed a dozen
+/// times a frame for an object that never moved.
 const ShadowSubmission = struct {
     mesh: Mesh,
     model: Matrix,
+    material: Material,
     bounds: Sphere,
-    /// Sort key. A depth pass ignores material, but it must preserve the full
-    /// indexed geometry identity: two submeshes may share vertex storage while
-    /// using different index buffers, counts or widths.
+    /// Sort key. Opaque depth ignores material, but the key must preserve the
+    /// full indexed geometry identity: two submeshes may share vertex storage
+    /// while using different index buffers, counts or widths.
     key: ShadowBatchKey,
     cacheable: bool,
 };
@@ -465,27 +467,8 @@ pub const SceneRenderer = struct {
     /// submission only records what to draw, and end() runs the passes in
     /// dependency order.
     pub fn draw(self: *SceneRenderer, inst: ModelInstance) void {
-        // One shadow submission per submesh, each with its own world bounds.
-        // Per-submesh rather than per-instance so a multi-material model's parts
-        // batch with matching geometry elsewhere in the scene, and so culling
-        // works at the granularity that is actually drawn.
         const model_matrix = inst.modelMatrix();
-
-        // World bounds once per submesh, reused by the shadow queue and by
-        // camera culling. The shadow queue is deliberately NOT camera-culled:
-        // an object behind the camera can still cast a shadow into view, so it
-        // is tested against each LIGHT's frustum instead, never this one.
-        if (inst.cast_shadows) {
-            for (inst.model.meshes) |submesh| {
-                self.shadow_queue.append(self.allocator, .{
-                    .mesh = submesh,
-                    .model = model_matrix,
-                    .bounds = submesh.bounds.transform(model_matrix),
-                    .key = ShadowBatchKey.fromMesh(submesh),
-                    .cacheable = inst.shadow_cacheable,
-                }) catch {};
-            }
-        }
+        self.enqueueShadowCasters(inst, model_matrix);
 
         const dx = self.camera.position.x - inst.position.x;
         const dy = self.camera.position.y - inst.position.y;
@@ -513,6 +496,49 @@ pub const SceneRenderer = struct {
                     .material = material,
                     .bounds = bounds,
                     .depth = depth,
+                }) catch {};
+            }
+        }
+    }
+
+    /// Submit only shadow casters. Retained camera culling uses this for an
+    /// object outside the visible camera frustum: it cannot affect the colour
+    /// or velocity buffers, but may still project a shadow into them.
+    pub fn drawShadowOnly(self: *SceneRenderer, inst: ModelInstance) void {
+        self.enqueueShadowCasters(inst, inst.modelMatrix());
+    }
+
+    /// Invalidate persistent caster depth after begin() has already built the
+    /// frame's shadow views. RenderWorld uses this when an observed caster
+    /// changes; ShadowRenderer also clears its current-frame skip flags.
+    pub fn invalidateCachedShadowsThisFrame(self: *SceneRenderer) void {
+        self.shadows.invalidateCacheThisFrame();
+    }
+
+    /// One shadow submission per submesh, each with its own world bounds.
+    /// Per-submesh rather than per-instance so a multi-material model's parts
+    /// batch with matching geometry elsewhere in the scene, and so culling
+    /// works at the granularity that is actually drawn.
+    fn enqueueShadowCasters(self: *SceneRenderer, inst: ModelInstance, model_matrix: Matrix) void {
+
+        // World bounds once per submesh, reused by the shadow queue and by
+        // camera culling. The shadow queue is deliberately NOT camera-culled:
+        // an object behind the camera can still cast a shadow into view, so it
+        // is tested against each LIGHT's frustum instead, never this one.
+        if (inst.cast_shadows) {
+            for (inst.model.meshes, 0..) |submesh, i| {
+                const material = inst.model.materials[inst.model.mesh_material[i]];
+                // A blended surface has no stable binary coverage for a depth
+                // shadow map. Do not turn glass/smoke into a fully opaque
+                // caster; use glTF MASK for cut-out shadow casters.
+                if (material.alpha_mode == .blend) continue;
+                self.shadow_queue.append(self.allocator, .{
+                    .mesh = submesh,
+                    .model = model_matrix,
+                    .material = material,
+                    .bounds = submesh.bounds.transform(model_matrix),
+                    .key = ShadowBatchKey.fromMesh(submesh),
+                    .cacheable = inst.shadow_cacheable,
                 }) catch {};
             }
         }
@@ -572,9 +598,26 @@ pub const SceneRenderer = struct {
             var j = i;
             self.instance_scratch.clearRetainingCapacity();
             while (j < items.len and items[j].key.eql(key)) : (j += 1) {
-                if (!frustum.intersectsSphere(items[j].bounds)) continue;
-                self.instance_scratch.append(self.allocator, items[j].model) catch {};
-                if (items[j].cacheable) self.shadow_static_instances += 1;
+                const item = items[j];
+                if (!frustum.intersectsSphere(item.bounds)) continue;
+                if (item.cacheable) self.shadow_static_instances += 1;
+
+                if (item.material.alpha_mode == .mask) {
+                    self.shadow_draws += 1;
+                    self.shadow_instances += 1;
+                    shadows.drawMeshAlphaMasked(
+                        item.mesh,
+                        item.model,
+                        item.material,
+                        view_proj,
+                        bias,
+                        slope,
+                        cull,
+                        sig,
+                    );
+                } else {
+                    self.instance_scratch.append(self.allocator, item.model) catch {};
+                }
             }
             if (self.instance_scratch.items.len > 0) {
                 self.shadow_draws += 1;

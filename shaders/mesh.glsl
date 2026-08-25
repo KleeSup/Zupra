@@ -22,6 +22,7 @@
 //------------------------------------------------------------------------------
 
 @include pbr_lib.glsl.inc
+@include material_alpha.glsl.inc
 
 @vs vs
 layout(binding=0) uniform vs_params {
@@ -89,6 +90,7 @@ layout(binding=1) uniform fs_params {
     vec4 base_color;
     vec4 material; // x metallic, y roughness, z occlusion_strength, w normal_scale
     vec4 emissive; // rgb factor, w strength
+    vec4 alpha_params; // x cutoff, y = 1 for glTF alpha MASK
 };
 
 layout(binding=2) uniform uv_params {
@@ -138,6 +140,7 @@ layout(binding=4) uniform shadow_params {
 @include_block uv_transform
 @include_block pbr_normal_map
 @include_block pbr_shade
+@include_block material_alpha
 
 void main() {
     // Resolve each map's UV: pick its set, apply its KHR transform.
@@ -147,13 +150,18 @@ void main() {
     vec2 uv_ao = mapUv(UV_OCCLUSION, v_uv, v_uv1);
     vec2 uv_em = mapUv(UV_EMISSIVE, v_uv, v_uv1);
 
+    // Alpha coverage decides whether this fragment exists, so resolve it
+    // before normal mapping and clustered lighting work.
+    vec4 base_sample = texture(sampler2D(base_color_map, smp_material), uv_bc);
+    float alpha = materialAlpha(base_color, base_sample);
+    discardMasked(alpha, alpha_params);
+
     vec3 N = normalize(v_world_normal);
     N = applyNormalMap(N, v_world_tangent, v_tangent_w, uv_n, material.w);
     N = orientTwoSidedNormal(N);
     vec3 V = normalize(camera_pos.xyz - v_world_pos);
 
-    vec3 tex = texture(sampler2D(base_color_map, smp_material), uv_bc).rgb;
-    vec3 albedo = base_color.rgb * pow(max(tex, vec3(0.0)), vec3(2.2));
+    vec3 albedo = base_color.rgb * pow(max(base_sample.rgb, vec3(0.0)), vec3(2.2));
 
     vec3 mr = texture(sampler2D(metallic_roughness_map, smp_material), uv_mr).rgb;
     float metallic = material.x * mr.b;
@@ -181,7 +189,7 @@ void main() {
 
     vec3 em = emissive.rgb * emissive.w *
               texture(sampler2D(emissive_map, smp_material), uv_em).rgb;
-    frag_color = vec4(color + em, base_color.a);
+    frag_color = vec4(color + em, alpha);
 }
 @end
 

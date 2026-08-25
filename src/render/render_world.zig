@@ -96,16 +96,17 @@ pub const Object = struct {
     prev_matrix: Matrix = undefined,
     /// World-space bounds, refitted with the matrix.
     bounds: Sphere = .empty,
-    /// Set when the transform changed since the last submit. Drives shadow
-    /// cache invalidation and tells the motion-vector pass which objects
-    /// actually moved.
+    /// Set when the transform changed since the last submit. It tells the
+    /// motion-vector pass which objects actually moved. Shadow-cache
+    /// invalidation is tracked separately at world scope, because changing one
+    /// caster invalidates every cached view that might contain it.
     dirty: bool = true,
 
     generation: u32 = 0,
 };
 
 pub const Stats = struct {
-    /// Objects in the world.
+    /// Live objects in the world, including explicitly hidden objects.
     total: u32 = 0,
     /// Objects that survived camera culling last submit.
     visible: u32 = 0,
@@ -123,6 +124,11 @@ pub const RenderWorld = struct {
     /// Bumped on every removal, so a handle to a reused slot fails the
     /// generation check rather than silently addressing its replacement.
     next_generation: u32 = 1,
+
+    /// Set by every public mutation that can change the set or pose of shadow
+    /// casters. Kept until submit() because SceneRenderer builds its shadow
+    /// views in begin(), before it receives this world's submissions.
+    shadow_cache_dirty: bool = false,
 
     stats: Stats = .{},
 
@@ -149,6 +155,7 @@ pub const RenderWorld = struct {
             obj.generation = self.next_generation;
             self.next_generation +%= 1;
             self.objects.items[index] = obj;
+            self.invalidateShadowCache();
             return .{ .index = index, .generation = obj.generation };
         }
 
@@ -156,6 +163,7 @@ pub const RenderWorld = struct {
         self.next_generation +%= 1;
         const index: u32 = @intCast(self.objects.items.len);
         try self.objects.append(self.allocator, obj);
+        self.invalidateShadowCache();
         return .{ .index = index, .generation = obj.generation };
     }
 
@@ -166,6 +174,7 @@ pub const RenderWorld = struct {
         // nothing can resolve here until the slot is reused.
         obj.generation = 0;
         self.free_list.append(self.allocator, handle.index) catch {};
+        self.invalidateShadowCache();
     }
 
     pub fn get(self: *const RenderWorld, handle: Handle) ?*const Object {
@@ -187,6 +196,7 @@ pub const RenderWorld = struct {
         obj.matrix = composeMatrix(position, rotation, scale);
         obj.bounds = modelBounds(obj.model).transform(obj.matrix);
         obj.dirty = true;
+        self.invalidateShadowCache();
     }
 
     pub fn setPosition(self: *RenderWorld, handle: Handle, position: Vec3) void {
@@ -196,7 +206,31 @@ pub const RenderWorld = struct {
 
     pub fn setVisible(self: *RenderWorld, handle: Handle, visible: bool) void {
         const obj = self.resolveMut(handle) orelse return;
+        if (obj.visible == visible) return;
         obj.visible = visible;
+        self.invalidateShadowCache();
+    }
+
+    /// Change whether this object contributes depth to shadow maps. Like
+    /// visibility, this must invalidate a retained tile: otherwise a disabled
+    /// caster leaves its old silhouette behind, or an enabled one never
+    /// appears until a light happens to move.
+    pub fn setCastShadows(self: *RenderWorld, handle: Handle, cast_shadows: bool) void {
+        const obj = self.resolveMut(handle) orelse return;
+        if (obj.cast_shadows == cast_shadows) return;
+        obj.cast_shadows = cast_shadows;
+        self.invalidateShadowCache();
+    }
+
+    /// Mark cached shadow depth stale on the next submit.
+    ///
+    /// Use this escape hatch when a model changes outside RenderWorld's
+    /// mutators, for example when its mesh data or material alpha coverage is
+    /// replaced in place. Over-invalidation is intentional: a redundant depth
+    /// redraw costs a frame, while stale cached depth is a visible correctness
+    /// bug.
+    pub fn invalidateShadowCache(self: *RenderWorld) void {
+        self.shadow_cache_dirty = true;
     }
 
     /// Cull against the camera and submit the survivors through the ordinary
@@ -206,18 +240,26 @@ pub const RenderWorld = struct {
     /// normal scene.draw(), so every renderer feature applies unchanged.
     ///
     /// Call between scene.begin() and scene.end().
-    pub fn submit(self: *RenderWorld, scene: *SceneRenderer, camera: Camera3D) void {
-        _ = camera;
-        //const frustum = Frustum.fromViewProj(camera.viewProjection());
+    pub fn submit(self: *RenderWorld, scene: *SceneRenderer, _: Camera3D) void {
+        // SceneRenderer copies the caller's camera in begin(), fixes its
+        // viewport, and applies this frame's TAA jitter. Match that exact
+        // projection here: an unjittered broadphase could reject a surface
+        // that the renderer's jittered per-submesh culling would draw.
+        const frustum = Frustum.fromViewProj(scene.camera.viewProjection());
 
-        self.stats = .{ .total = @intCast(self.objects.items.len) };
+        // SceneRenderer has already called ShadowRenderer.build() in begin().
+        // This companion API invalidates both persistent cache entries and the
+        // current frame's cached-view skip flags, so a change reaches the atlas
+        // immediately rather than one frame late.
+        if (self.shadow_cache_dirty) scene.invalidateCachedShadowsThisFrame();
+
+        self.stats = .{};
 
         for (self.objects.items) |*obj| {
-            if (obj.generation == 0 or !obj.visible) continue;
+            if (obj.generation == 0) continue;
+            self.stats.total += 1;
             if (obj.dirty) self.stats.moved += 1;
-
-            //if (!frustum.intersectsSphere(obj.bounds)) continue;
-            self.stats.visible += 1;
+            if (!obj.visible) continue;
 
             var inst = obj.model.instance();
             inst.position = obj.position;
@@ -226,6 +268,21 @@ pub const RenderWorld = struct {
             inst.cast_shadows = obj.cast_shadows;
             inst.shadow_cacheable = !obj.dirty;
 
+            // Empty bounds must follow SceneRenderer's conservative policy and
+            // stay visible: a loader bug should not make geometry silently
+            // disappear. Respect its debug culling toggle for the same reason.
+            const camera_visible = !scene.frustum_culling or
+                obj.bounds.isEmpty() or
+                frustum.intersectsSphere(obj.bounds);
+            if (!camera_visible) {
+                // Camera culling must never become shadow culling. A doorway,
+                // truck wheel or wall behind the camera can still cast into the
+                // visible part of a light volume, so enqueue its caster only.
+                if (obj.cast_shadows) scene.drawShadowOnly(inst);
+                continue;
+            }
+
+            self.stats.visible += 1;
             if (obj.dirty) {
                 scene.drawMoved(inst, obj.prev_matrix);
             } else {
@@ -234,12 +291,15 @@ pub const RenderWorld = struct {
         }
 
         // History rolls forward AFTER submission, so a motion-vector pass reads
-        // the same pair of matrices the draw used.
+        // the same pair of matrices the draw used. This deliberately includes
+        // hidden and camera-culled objects: when one re-enters the view, it
+        // must not inherit a transform from an arbitrarily old visible frame.
         for (self.objects.items) |*obj| {
             if (obj.generation == 0) continue;
             obj.prev_matrix = obj.matrix;
             obj.dirty = false;
         }
+        self.shadow_cache_dirty = false;
     }
 
     fn resolve(self: *const RenderWorld, handle: Handle) ?*const Object {
@@ -269,4 +329,49 @@ fn composeMatrix(position: Vec3, rotation: Quaternion, scale: Vec3) Matrix {
     const r = math.zm.matFromQuat(rotation);
     const t = math.zm.translation(position.x, position.y, position.z);
     return math.zm.mul(math.zm.mul(s, r), t);
+}
+
+test "RenderWorld marks the shadow cache dirty for caster mutations" {
+    var world = RenderWorld.init(std.testing.allocator);
+    defer world.deinit();
+
+    // An empty model is enough for this ownership/state test: add() accepts it
+    // and gives the object an empty, conservatively visible bound without
+    // touching any GPU resource.
+    var model = Model{
+        .meshes = &.{},
+        .materials = &.{},
+        .mesh_material = &.{},
+        .allocator = std.testing.allocator,
+    };
+
+    const handle = try world.add(.{ .model = &model });
+    try std.testing.expect(world.shadow_cache_dirty);
+
+    world.shadow_cache_dirty = false;
+    world.setTransform(
+        handle,
+        .{ .x = 1, .y = 0, .z = 0 },
+        .{ 0, 0, 0, 1 },
+        .{ .x = 1, .y = 1, .z = 1 },
+    );
+    try std.testing.expect(world.shadow_cache_dirty);
+
+    world.shadow_cache_dirty = false;
+    world.setVisible(handle, false);
+    try std.testing.expect(world.shadow_cache_dirty);
+    world.shadow_cache_dirty = false;
+    world.setVisible(handle, false);
+    try std.testing.expect(!world.shadow_cache_dirty);
+
+    world.setCastShadows(handle, false);
+    try std.testing.expect(world.shadow_cache_dirty);
+
+    world.shadow_cache_dirty = false;
+    world.invalidateShadowCache();
+    try std.testing.expect(world.shadow_cache_dirty);
+
+    world.shadow_cache_dirty = false;
+    world.remove(handle);
+    try std.testing.expect(world.shadow_cache_dirty);
 }

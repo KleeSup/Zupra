@@ -135,6 +135,7 @@ pub const GeometryRenderer = struct {
             .base_color = .{ c.r, c.g, c.b, c.a },
             .mat_params = .{ material.metallic, material.roughness, material.occlusion_strength, material.normal_scale },
             .emissive = .{ material.emissive.r, material.emissive.g, material.emissive.b, material.emissive_strength },
+            .alpha_params = material.alphaTestParams(),
         };
         const mat_smp = material.sampler orelse self.material_sampler;
 

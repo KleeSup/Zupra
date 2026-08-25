@@ -150,6 +150,7 @@ pub fn build(b: *Build) !void {
     // Expose include shaders to the outside.
     const shader_includes = b.addNamedWriteFiles("shader-includes");
     _ = shader_includes.addCopyFile(b.path("shaders/material_surface.glsl.inc"), "material_surface.glsl.inc");
+    _ = shader_includes.addCopyFile(b.path("shaders/material_alpha.glsl.inc"), "material_alpha.glsl.inc");
     _ = shader_includes.addCopyFile(b.path("shaders/pbr_lib.glsl.inc"), "pbr_lib.glsl.inc");
 
     bakeBrdfLut(b, &target, compile_step);

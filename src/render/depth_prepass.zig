@@ -52,6 +52,7 @@ pub const DepthPrepass = struct {
     /// transform bit for bit or the shading pass z-fights against its own
     /// depth. See the header comment in depth_prepass.glsl.
     shader: sg.Shader,
+    material_sampler: sg.Sampler,
 
     view_proj: Matrix = undefined,
     pass: PassSignature = undefined,
@@ -66,10 +67,21 @@ pub const DepthPrepass = struct {
                 .{@tagName(state)},
             );
         }
-        return .{ .cache = cache, .shader = shader };
+        return .{
+            .cache = cache,
+            .shader = shader,
+            .material_sampler = sg.makeSampler(.{
+                .min_filter = .LINEAR,
+                .mag_filter = .LINEAR,
+                .mipmap_filter = .LINEAR,
+                .wrap_u = .REPEAT,
+                .wrap_v = .REPEAT,
+            }),
+        };
     }
 
     pub fn deinit(self: *DepthPrepass) void {
+        sg.destroySampler(self.material_sampler);
         sg.destroyShader(self.shader);
     }
 
@@ -127,15 +139,26 @@ pub const DepthPrepass = struct {
         var vs = shd_prepass.VsParams{
             .model = @bitCast(model),
             .view_proj = @bitCast(self.view_proj),
+            .uv_scale = .{ material.uv_scale[0], material.uv_scale[1], 0, 0 },
+        };
+        const base_color = material.base_color;
+        var fs = shd_prepass.FsParams{
+            .base_color = .{ base_color.r, base_color.g, base_color.b, base_color.a },
+            .alpha_params = material.alphaTestParams(),
         };
 
         var bindings = sg.Bindings{};
         bindings.vertex_buffers[0] = mesh.vbuf;
         bindings.index_buffer = mesh.ibuf;
+        bindings.views[shd_prepass.VIEW_base_color_map] = material.map(.base_color).view;
+        bindings.samplers[shd_prepass.SMP_smp_material] = material.sampler orelse self.material_sampler;
 
         sg.applyPipeline(pip);
         sg.applyBindings(bindings);
         sg.applyUniforms(shd_prepass.UB_vs_params, sg.asRange(&vs));
+        sg.applyUniforms(shd_prepass.UB_fs_params, sg.asRange(&fs));
+        var uvp = mesh_mod.uvParams(material);
+        sg.applyUniforms(shd_prepass.UB_uv_params, sg.asRange(&uvp));
         sg.draw(0, mesh.index_count, 1);
     }
 };

@@ -22,6 +22,7 @@ const zupra = @import("../root.zig");
 
 const shd_depth = @import("shaders").shadow_depth;
 const shd_depth_inst = @import("shaders").shadow_depth_instanced;
+const shd_depth_alpha = @import("shaders").shadow_depth_alpha;
 const shd_clear = @import("shaders").shadow_clear;
 
 const Matrix = math.Matrix;
@@ -146,8 +147,10 @@ pub const ShadowRenderer = struct {
     cache: *PipelineCache,
     atlas: ShadowAtlas,
     shader: sg.Shader,
+    alpha_shader: sg.Shader,
     clear_shader: sg.Shader,
     clear_triangle: FullscreenTriangle,
+    material_sampler: sg.Sampler,
 
     /// Cached static shadows for point and spot lights, keyed by light id.
     ///
@@ -192,6 +195,7 @@ pub const ShadowRenderer = struct {
             .usage = .{ .vertex_buffer = true, .stream_update = true },
         });
         const shader = sg.makeShader(shd_depth.shadowDepthShaderDesc(sg.queryBackend()));
+        const alpha_shader = sg.makeShader(shd_depth_alpha.shadowDepthAlphaShaderDesc(sg.queryBackend()));
         const clear_shader = sg.makeShader(shd_clear.shadowClearShaderDesc(sg.queryBackend()));
         const clear_triangle = FullscreenTriangle.init();
         // Diagnostic: if the depth-only shader failed to compile, every shadow
@@ -201,6 +205,10 @@ pub const ShadowRenderer = struct {
         if (state != .VALID) {
             std.log.err("ShadowRenderer: shadow_depth shader is {s} (not VALID) — depth pass will fail", .{@tagName(state)});
         }
+        const alpha_state = sg.queryShaderState(alpha_shader);
+        if (alpha_state != .VALID) {
+            std.log.err("ShadowRenderer: shadow_depth_alpha shader is {s} (not VALID) — masked casters will not render", .{@tagName(alpha_state)});
+        }
         const inst_state = sg.queryShaderState(inst_shader);
         if (inst_state != .VALID) {
             std.log.err("ShadowRenderer: shadow_depth_instanced shader is {s} (not VALID) — batched depth draws will fail", .{@tagName(inst_state)});
@@ -209,8 +217,16 @@ pub const ShadowRenderer = struct {
             .cache = cache,
             .atlas = try ShadowAtlas.init(allocator, opts),
             .shader = shader,
+            .alpha_shader = alpha_shader,
             .clear_shader = clear_shader,
             .clear_triangle = clear_triangle,
+            .material_sampler = sg.makeSampler(.{
+                .min_filter = .LINEAR,
+                .mag_filter = .LINEAR,
+                .mipmap_filter = .LINEAR,
+                .wrap_u = .REPEAT,
+                .wrap_v = .REPEAT,
+            }),
             .inst_shader = inst_shader,
             .inst_buf = inst_buf,
             .allocator = allocator,
@@ -224,8 +240,10 @@ pub const ShadowRenderer = struct {
         self.atlas.deinit();
         self.clear_triangle.deinit();
         sg.destroyShader(self.clear_shader);
+        sg.destroySampler(self.material_sampler);
         sg.destroyBuffer(self.inst_buf);
         sg.destroyShader(self.inst_shader);
+        sg.destroyShader(self.alpha_shader);
         sg.destroyShader(self.shader);
     }
 
@@ -370,6 +388,20 @@ pub const ShadowRenderer = struct {
     /// this is the caller's way to say so.
     pub fn invalidateCache(self: *ShadowRenderer) void {
         for (self.shadow_cache.items) |*e| e.valid = false;
+    }
+
+    /// Invalidate cached shadow depth after build() has already selected the
+    /// cached views for this frame. Retained-world submission happens in that
+    /// window: clearing CacheEntry.valid alone would be one frame late because
+    /// render() would still skip the views recorded in cached_view.
+    ///
+    /// Do not clear atlas.has_cached_tiles here. If build() found any valid
+    /// persistent tiles, render() must retain regional clears while it redraws
+    /// the newly-invalid views; a whole-atlas clear would erase cache tiles
+    /// that are not part of the current caster set.
+    pub fn invalidateCacheThisFrame(self: *ShadowRenderer) void {
+        self.invalidateCache();
+        for (self.cached_view.items) |*cached| cached.* = false;
     }
 
     /// PassSignature for the depth-only atlas passes: no color, depth only.
@@ -896,6 +928,64 @@ pub const ShadowRenderer = struct {
         sg.draw(0, mesh.index_count, 1);
     }
 
+    /// Draw one alpha-masked mesh into the current caster tile. Unlike the
+    /// opaque instanced path this samples the glTF base-colour texture and
+    /// rejects fragments below alphaCutoff, so it intentionally remains one
+    /// draw per visible instance until material-aware shadow instancing exists.
+    pub fn drawMeshAlphaMasked(
+        self: *ShadowRenderer,
+        mesh: Mesh,
+        model: Matrix,
+        material: Material,
+        view_proj: Matrix,
+        depth_bias: f32,
+        slope_bias: f32,
+        cull: sg.CullMode,
+        sig: PassSignature,
+    ) void {
+        std.debug.assert(material.alpha_mode == .mask);
+
+        var key = PipelineKey{
+            .shader = self.alpha_shader,
+            .layout = .mesh,
+            .index_type = mesh.index_type,
+            .indexed = true,
+            .pass = sig,
+            .primitive = .TRIANGLES,
+            .cull = cull,
+            .blend = .none,
+            .depth_test = true,
+            .depth_write = true,
+        };
+        key.setDepthBias(depth_bias, slope_bias, 0.0);
+
+        const pip = self.cache.get(key) catch return;
+
+        var vs = shd_depth_alpha.VsParams{
+            .mvp = matToArr(zm.mul(model, view_proj)),
+            .uv_scale = .{ material.uv_scale[0], material.uv_scale[1], 0, 0 },
+        };
+        const base_color = material.base_color;
+        var fs = shd_depth_alpha.FsParams{
+            .base_color = .{ base_color.r, base_color.g, base_color.b, base_color.a },
+            .alpha_params = material.alphaTestParams(),
+        };
+
+        var bindings = sg.Bindings{};
+        bindings.vertex_buffers[0] = mesh.vbuf;
+        bindings.index_buffer = mesh.ibuf;
+        bindings.views[shd_depth_alpha.VIEW_base_color_map] = material.map(.base_color).view;
+        bindings.samplers[shd_depth_alpha.SMP_smp_material] = material.sampler orelse self.material_sampler;
+
+        sg.applyPipeline(pip);
+        sg.applyBindings(bindings);
+        sg.applyUniforms(shd_depth_alpha.UB_vs_params, sg.asRange(&vs));
+        sg.applyUniforms(shd_depth_alpha.UB_fs_params, sg.asRange(&fs));
+        var uvp = mesh_mod.uvParams(material);
+        sg.applyUniforms(shd_depth_alpha.UB_uv_params, sg.asRange(&uvp));
+        sg.draw(0, mesh.index_count, 1);
+    }
+
     /// Draw one mesh once per supplied model matrix, as a single instanced draw.
     ///
     /// `models` are row-major matrices in the engine's usual layout; they go to
@@ -964,8 +1054,34 @@ pub const ShadowRenderer = struct {
 
     pub fn drawModel(self: *ShadowRenderer, inst: ModelInstance, view_proj: Matrix, depth_bias: f32, slope_bias: f32, sig: PassSignature) void {
         const m = inst.modelMatrix();
-        for (inst.model.meshes) |submesh| {
-            self.drawMesh(submesh, m, view_proj, depth_bias, slope_bias, sig);
+        for (inst.model.meshes, 0..) |submesh, i| {
+            const material = inst.model.materials[inst.model.mesh_material[i]];
+            // A blend material has no binary coverage to put in a depth shadow
+            // map. Masked materials do, but must sample their base-colour alpha
+            // just like SceneRenderer's shadow queue does.
+            if (material.alpha_mode == .blend) continue;
+            if (material.alpha_mode == .mask) {
+                self.drawMeshAlphaMasked(
+                    submesh,
+                    m,
+                    material,
+                    view_proj,
+                    depth_bias,
+                    slope_bias,
+                    material.cullMode(),
+                    sig,
+                );
+            } else {
+                self.drawMesh(
+                    submesh,
+                    m,
+                    view_proj,
+                    depth_bias,
+                    slope_bias,
+                    material.cullMode(),
+                    sig,
+                );
+            }
         }
     }
 

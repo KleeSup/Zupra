@@ -44,15 +44,19 @@ const VelocityVsParams = extern struct {
     prev_model: [16]f32,
     view_proj: [16]f32,
     prev_view_proj: [16]f32,
+    uv_scale: [4]f32,
 };
 
 const VelocityFsParams = extern struct {
     params: [4]f32, // origin_top_left, unused
+    base_color: [4]f32,
+    alpha_params: [4]f32,
 };
 
 pub const VelocityPass = struct {
     cache: *PipelineCache,
     shader: sg.Shader,
+    material_sampler: sg.Sampler,
     target: Framebuffer = undefined,
 
     view_proj: Matrix = undefined,
@@ -71,6 +75,13 @@ pub const VelocityPass = struct {
         var self = VelocityPass{
             .cache = cache,
             .shader = sg.makeShader(shd.velocityShaderDesc(sg.queryBackend())),
+            .material_sampler = sg.makeSampler(.{
+                .min_filter = .LINEAR,
+                .mag_filter = .LINEAR,
+                .mipmap_filter = .LINEAR,
+                .wrap_u = .REPEAT,
+                .wrap_v = .REPEAT,
+            }),
             .prev_view_proj = math.zm.identity(),
         };
         self.build(width, height);
@@ -79,6 +90,7 @@ pub const VelocityPass = struct {
 
     pub fn deinit(self: *VelocityPass) void {
         self.target.deinit();
+        sg.destroySampler(self.material_sampler);
         sg.destroyShader(self.shader);
     }
 
@@ -135,6 +147,11 @@ pub const VelocityPass = struct {
     /// transform actually changed.
     pub fn draw(self: *VelocityPass, mesh: Mesh, model: Matrix, prev_model: Matrix, material: Material) void {
         std.debug.assert(self.active);
+        // Blended geometry does not contribute to opaque depth, so annotating
+        // the opaque-depth velocity target with it would overwrite motion for
+        // a different surface. It remains an independent transparent-TAA
+        // problem; alpha MASK does contribute and is handled below.
+        if (material.alpha_mode == .blend) return;
 
         const key = PipelineKey{
             .shader = self.shader,
@@ -163,19 +180,27 @@ pub const VelocityPass = struct {
             .prev_model = @bitCast(prev_model),
             .view_proj = @bitCast(self.view_proj),
             .prev_view_proj = @bitCast(self.prev_view_proj),
+            .uv_scale = .{ material.uv_scale[0], material.uv_scale[1], 0, 0 },
         };
+        const base_color = material.base_color;
         var fs = VelocityFsParams{
             .params = .{ if (sg.queryFeatures().origin_top_left) 1.0 else 0.0, 0, 0, 0 },
+            .base_color = .{ base_color.r, base_color.g, base_color.b, base_color.a },
+            .alpha_params = material.alphaTestParams(),
         };
 
         var bindings = sg.Bindings{};
         bindings.vertex_buffers[0] = mesh.vbuf;
         bindings.index_buffer = mesh.ibuf;
+        bindings.views[shd.VIEW_base_color_map] = material.map(.base_color).view;
+        bindings.samplers[shd.SMP_smp_material] = material.sampler orelse self.material_sampler;
 
         sg.applyPipeline(pip);
         sg.applyBindings(bindings);
         sg.applyUniforms(shd.UB_vs_params, sg.asRange(&vs));
         sg.applyUniforms(shd.UB_velocity_params, sg.asRange(&fs));
+        var uvp = mesh_mod.uvParams(material);
+        sg.applyUniforms(shd.UB_uv_params, sg.asRange(&uvp));
         sg.draw(0, mesh.index_count, 1);
 
         self.any_drawn = true;

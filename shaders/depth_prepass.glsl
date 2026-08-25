@@ -24,16 +24,24 @@
 //  Output matches the G-buffer's convention -- world normal in rgb, alpha as a
 //  coverage mask -- so the AO shader is identical for both paths.
 //
-//  Reuses the .mesh vertex layout (pos/normal/uv/tangent/uv1). uv, tangent and
-//  uv1 are unused but kept referenced so shdc does NOT strip them: the pipeline
-//  binds the full .mesh layout, and a generated vertex-input signature missing
-//  attributes would mismatch it and fail pipeline creation.
+//  Alpha-masked materials sample their base-colour alpha here too. Without that
+//  discard, foliage and grates lay down solid prepass depth/normals while the
+//  colour pass punches holes through them, corrupting both early-z and AO.
+//
+//  Reuses the .mesh vertex layout (pos/normal/uv/tangent/uv1). Tangent is kept
+//  referenced even though this pass does not use it, so shdc does NOT strip it:
+//  the pipeline binds the full .mesh layout, and a generated vertex-input
+//  signature missing attributes would mismatch it and fail pipeline creation.
 //------------------------------------------------------------------------------
+
+@include pbr_lib.glsl.inc
+@include material_alpha.glsl.inc
 
 @vs vs
 layout(binding=0) uniform vs_params {
     mat4 model;
     mat4 view_proj;
+    vec4 uv_scale;
 };
 
 in vec3 pos;
@@ -43,6 +51,8 @@ in vec4 tangent;
 in vec2 uv1;
 
 out vec3 v_normal;
+out vec2 v_uv;
+out vec2 v_uv1;
 
 void main() {
     vec4 world = model * vec4(pos, 1.0);
@@ -54,20 +64,49 @@ void main() {
     // to stay the same, or AO and shading would disagree about which way a
     // surface faces.
     v_normal = mat3(model) * normal;
+    v_uv = uv * uv_scale.xy;
+    v_uv1 = uv1 * uv_scale.xy;
 
     // Keep the remaining unused attributes live. Applied AFTER the transform and
     // as an addition of exact zero, so the position arithmetic above is
     // untouched; perturbing `pos` before the multiply would break the bit
     // equality with mesh.glsl that this pass depends on.
-    gl_Position.x += (uv.x + tangent.x + uv1.x) * 0.0;
+    gl_Position.x += tangent.x * 0.0;
 }
 @end
 
 @fs fs
+layout(binding=0) uniform texture2D base_color_map;
+layout(binding=0) uniform sampler smp_material;
+
+layout(binding=1) uniform fs_params {
+    vec4 base_color;
+    vec4 alpha_params; // x cutoff, y = 1 for glTF alpha MASK
+};
+
+layout(binding=2) uniform uv_params {
+    vec4 uv_m[5];
+    vec4 uv_aux[5];
+};
+
 in vec3 v_normal;
+in vec2 v_uv;
+in vec2 v_uv1;
 out vec4 frag_color;
 
+@include_block uv_transform
+@include_block material_alpha
+
 void main() {
+    // Most prepass draws are opaque. Keep their original position/normal-only
+    // cost and sample the base-colour map only for a mask, where coverage is
+    // genuinely needed to decide depth.
+    if (alpha_params.y > 0.5) {
+        vec2 uv_bc = mapUv(UV_BASE_COLOR, v_uv, v_uv1);
+        vec4 base_sample = texture(sampler2D(base_color_map, smp_material), uv_bc);
+        discardMasked(materialAlpha(base_color, base_sample), alpha_params);
+    }
+
     // alpha = 1 marks "geometry here". The AO pass reads it exactly as it reads
     // the G-buffer's normal alpha, so background pixels are recognised the same
     // way in both paths.

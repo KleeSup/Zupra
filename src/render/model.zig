@@ -15,6 +15,7 @@
 
 const std = @import("std");
 const zupra = @import("../root.zig");
+const sg = @import("sokol").gfx;
 
 const math = @import("../math.zig");
 const zm = math.zm;
@@ -24,6 +25,7 @@ const pipeline = @import("../graphics/pipeline.zig");
 
 const Mesh = mesh_mod.Mesh;
 const Material = @import("material.zig").Material;
+const Texture = @import("../graphics/texture.zig").Texture;
 const ShadingModel = @import("material.zig").ShadingModel;
 const MeshRenderer = mesh_mod.MeshRenderer;
 const PipelineCache = pipeline.PipelineCache;
@@ -39,6 +41,14 @@ pub const Model = struct {
     materials: []Material,
     mesh_material: []usize, // mesh_material[i] = material index for meshes[i]
     allocator: std.mem.Allocator,
+
+    /// GPU resources made specifically while loading this model. They are kept
+    /// separate from `materials`: a Material is also used by procedural models
+    /// and can reference a texture/sampler owned by the application, a cache,
+    /// or the framework defaults. Only a loader that created the resources may
+    /// put them here, and Model.deinit destroys each handle exactly once.
+    owned_textures: ?[]Texture = null,
+    owned_samplers: ?[]sg.Sampler = null,
 
     /// Convenience: a one-submesh, one-material model that takes ownership of
     /// `mesh`. Frees its small backing arrays on deinit.
@@ -59,6 +69,28 @@ pub const Model = struct {
         return .{ .meshes = meshes, .materials = materials, .mesh_material = mesh_material, .allocator = allocator };
     }
 
+    /// Like init(), but additionally transfers ownership of GPU resources that
+    /// were created for this model. This is intentionally explicit so adding a
+    /// Texture to a hand-authored Material never makes Model.deinit destroy it.
+    pub fn initWithOwnedResources(
+        allocator: std.mem.Allocator,
+        meshes: []Mesh,
+        materials: []Material,
+        mesh_material: []usize,
+        owned_textures: ?[]Texture,
+        owned_samplers: ?[]sg.Sampler,
+    ) Model {
+        std.debug.assert(meshes.len == mesh_material.len);
+        return .{
+            .meshes = meshes,
+            .materials = materials,
+            .mesh_material = mesh_material,
+            .allocator = allocator,
+            .owned_textures = owned_textures,
+            .owned_samplers = owned_samplers,
+        };
+    }
+
     pub fn setShadingModel(self: *Model, shading: ShadingModel) void {
         for (self.materials) |*material| {
             material.shading = shading;
@@ -77,6 +109,19 @@ pub const Model = struct {
         self.allocator.free(self.meshes);
         self.allocator.free(self.materials);
         self.allocator.free(self.mesh_material);
+
+        if (self.owned_textures) |textures| {
+            for (textures) |texture| texture.deinit();
+            self.allocator.free(textures);
+            self.owned_textures = null;
+        }
+        if (self.owned_samplers) |samplers| {
+            for (samplers) |sampler| {
+                if (sampler.id != 0) sg.destroySampler(sampler);
+            }
+            self.allocator.free(samplers);
+            self.owned_samplers = null;
+        }
     }
 
     /// Create a placed instance of this model (identity transform).

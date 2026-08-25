@@ -169,17 +169,59 @@ const Builder = struct {
     samplers: SamplerCache = .{},
     flip: Matrix,
 
+    // The caches deduplicate references while a scene is assembled; these
+    // lists are the actual ownership ledger. A texture or sampler is appended
+    // exactly when it is created, then transferred into the returned Model.
+    owned_textures: std.ArrayListUnmanaged(Texture) = .empty,
+    owned_samplers: std.ArrayListUnmanaged(sg.Sampler) = .empty,
+
     meshes: std.ArrayListUnmanaged(Mesh) = .empty,
     materials: std.ArrayListUnmanaged(Material) = .empty,
     mapping: std.ArrayListUnmanaged(usize) = .empty,
     cameras: std.ArrayListUnmanaged(SceneCamera) = .empty,
     lights: std.ArrayListUnmanaged(Light) = .empty,
+
+    fn deinit(self: *Builder) void {
+        // On a failed load, all already-uploaded GPU resources must go away;
+        // ArrayList backing storage alone is not enough for Mesh/Texture.
+        for (self.meshes.items) |mesh| mesh.deinit();
+        self.meshes.deinit(self.allocator);
+        self.materials.deinit(self.allocator);
+        self.mapping.deinit(self.allocator);
+        self.cameras.deinit(self.allocator);
+        self.lights.deinit(self.allocator);
+
+        for (self.owned_textures.items) |texture| texture.deinit();
+        self.owned_textures.deinit(self.allocator);
+        for (self.owned_samplers.items) |sampler| {
+            if (sampler.id != 0) sg.destroySampler(sampler);
+        }
+        self.owned_samplers.deinit(self.allocator);
+
+        self.cache.deinit(self.allocator);
+        self.samplers.deinit(self.allocator);
+    }
+
+    fn takeOwnedTextures(self: *Builder) !?[]Texture {
+        if (self.owned_textures.items.len == 0) {
+            self.owned_textures.deinit(self.allocator);
+            return null;
+        }
+        return try self.owned_textures.toOwnedSlice(self.allocator);
+    }
+
+    fn takeOwnedSamplers(self: *Builder) !?[]sg.Sampler {
+        if (self.owned_samplers.items.len == 0) {
+            self.owned_samplers.deinit(self.allocator);
+            return null;
+        }
+        return try self.owned_samplers.toOwnedSlice(self.allocator);
+    }
 };
 
 fn buildScene(allocator: std.mem.Allocator, data: *c.Data, base_dir: []const u8) !Scene {
     var b = Builder{ .allocator = allocator, .base_dir = base_dir, .flip = rhToLh() };
-    defer b.cache.deinit(allocator);
-    defer b.samplers.deinit(allocator);
+    defer b.deinit();
 
     // Walk the active scene's node hierarchy. cgltf gives us each node's WORLD
     // transform directly (it composes the parent chain), so no manual recursion
@@ -194,16 +236,35 @@ fn buildScene(allocator: std.mem.Allocator, data: *c.Data, base_dir: []const u8)
         for (nodes[0..data.nodes_count]) |*n| try visitNode(&b, n);
     }
 
-    const model = Model{
-        .meshes = try b.meshes.toOwnedSlice(allocator),
-        .materials = try b.materials.toOwnedSlice(allocator),
-        .mesh_material = try b.mapping.toOwnedSlice(allocator),
-        .allocator = allocator,
+    const meshes = try b.meshes.toOwnedSlice(allocator);
+    errdefer {
+        for (meshes) |mesh| mesh.deinit();
+        allocator.free(meshes);
+    }
+    const materials = try b.materials.toOwnedSlice(allocator);
+    errdefer allocator.free(materials);
+    const mapping = try b.mapping.toOwnedSlice(allocator);
+    errdefer allocator.free(mapping);
+    const owned_textures = try b.takeOwnedTextures();
+    errdefer if (owned_textures) |textures| {
+        for (textures) |texture| texture.deinit();
+        allocator.free(textures);
     };
+    const owned_samplers = try b.takeOwnedSamplers();
+    errdefer if (owned_samplers) |samplers| {
+        for (samplers) |sampler| if (sampler.id != 0) sg.destroySampler(sampler);
+        allocator.free(samplers);
+    };
+    const cameras = try b.cameras.toOwnedSlice(allocator);
+    errdefer allocator.free(cameras);
+    const lights = try b.lights.toOwnedSlice(allocator);
+    errdefer allocator.free(lights);
+
+    const model = Model.initWithOwnedResources(allocator, meshes, materials, mapping, owned_textures, owned_samplers);
     return Scene{
         .model = model,
-        .cameras = try b.cameras.toOwnedSlice(allocator),
-        .lights = try b.lights.toOwnedSlice(allocator),
+        .cameras = cameras,
+        .lights = lights,
         .allocator = allocator,
     };
 }
@@ -332,9 +393,12 @@ fn appendMesh(b: *Builder, prim: *c.Primitive, verts: []Vertex3D, vcount: usize,
 
 fn pushPrim(b: *Builder, prim: *c.Primitive, verts: []Vertex3D, idx: graphics.IndexData) !void {
     const mesh = Mesh.init(verts, idx);
+    var mesh_transferred = false;
+    errdefer if (!mesh_transferred) mesh.deinit();
     const mat = try buildMaterial(b, prim);
     const slot = b.materials.items.len;
     try b.meshes.append(b.allocator, mesh);
+    mesh_transferred = true;
     try b.materials.append(b.allocator, mat);
     try b.mapping.append(b.allocator, slot);
 }
@@ -519,7 +583,15 @@ fn resolveSamplerImpl(b: *Builder, gm: *c.Material) !?sg.Sampler {
             .mag_filter = key.mag,
             .mipmap_filter = key.mip,
         });
-        try b.samplers.put(b.allocator, key, sm);
+        b.owned_samplers.append(b.allocator, sm) catch |err| {
+            if (sm.id != 0) sg.destroySampler(sm);
+            return err;
+        };
+        b.samplers.put(b.allocator, key, sm) catch |err| {
+            const owned = b.owned_samplers.pop().?;
+            if (owned.id != 0) sg.destroySampler(owned);
+            return err;
+        };
         return sm;
     }
     return null; // no textures at all -> renderer uses its default sampler
@@ -576,7 +648,17 @@ fn loadTexView(b: *Builder, view: c.TextureView) !?Texture {
         }
         break :blk null;
     };
-    if (loaded) |t| try b.cache.put(b.allocator, image, t);
+    if (loaded) |t| {
+        b.owned_textures.append(b.allocator, t) catch |err| {
+            t.deinit();
+            return err;
+        };
+        b.cache.put(b.allocator, image, t) catch |err| {
+            const owned = b.owned_textures.pop().?;
+            owned.deinit();
+            return err;
+        };
+    }
     return loaded;
 }
 
