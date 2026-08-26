@@ -53,8 +53,11 @@
         "build.zig",
         "build.zig.zon",
         "src",
-        // For example...
-        //"LICENSE",
-        //"README.md",
+        "shaders",
+        "resources",
+        "tools",
+        "libs",
+        "examples",
+        "README.md",
     },
 }

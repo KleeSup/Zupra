@@ -28,6 +28,27 @@ is no fixed light-count limit. Directional lights and ambient are set on
 Everything renders in linear HDR into an offscreen buffer and is tonemapped at
 the end, so bloom, colour grading and other effects operate on real light values.
 
+## Using Zupra as a dependency
+
+Zupra exposes a `zupra` build module. Its BRDF integration LUT is embedded in
+the final executable, so a packaged application does not need a `resources`
+folder or a particular working directory at runtime.
+
+```zig
+const zupra_dep = b.dependency("Zupra", .{
+    .target = target,
+    .optimize = optimize,
+    // Optional: the default is a shipped 512x512 LUT at 4096 samples.
+    .brdf_lut_resolution = 256,
+    .brdf_lut_samples = 1024,
+});
+exe.root_module.addImport("zupra", zupra_dep.module("zupra"));
+```
+
+The two LUT options are build-time quality settings: non-default values bake a
+cache-local asset once and embed it. They are deliberately flat because Zig's
+dependency argument syntax does not support nested settings structs.
+
 ## Rendering pipeline
 
 ### Application & platform

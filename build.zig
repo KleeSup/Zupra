@@ -2,10 +2,35 @@ const std = @import("std");
 const sokol = @import("sokol");
 const Build = std.Build;
 
+/// Build-time quality settings for the embedded split-sum BRDF lookup table.
+///
+/// Zig dependency arguments are intentionally flat, so a consuming project
+/// supplies these as `.brdf_lut_resolution` and `.brdf_lut_samples` to
+/// `b.dependency("Zupra", ...)`. Keeping them together here documents the
+/// coherent setting group and gives this package one validation boundary.
+pub const BrdfLutBuildSettings = struct {
+    /// Width and height of the square RG16F LUT. The shipped 512x512 asset is
+    /// used directly for the default, so normal builds never wait for a bake.
+    resolution: u32 = 512,
+    /// GGX samples evaluated for each LUT texel when a custom LUT is baked.
+    sample_count: u32 = 4096,
+
+    fn isDefault(self: BrdfLutBuildSettings) bool {
+        return self.resolution == 512 and self.sample_count == 4096;
+    }
+};
+
 pub fn build(b: *Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const build_example = b.option(bool, "example", "Build the playground executable (default: Debug only)") orelse (optimize == .Debug);
+    // A package dependency should expose its framework module, never compile
+    // the playground merely because the consuming project is a Debug build.
+    const build_example = b.option(bool, "example", "Build the playground executable (default: Debug only for Zupra itself)") orelse (b.dep_prefix.len == 0 and optimize == .Debug);
+    // Generated shader bindings are checked in. Regenerating them is a source
+    // tree operation for framework development, not something an application
+    // importing Zupra should attempt in its dependency cache.
+    const regenerate_shaders = b.option(bool, "regenerate-shaders", "Regenerate checked-in shader bindings (default: only for Zupra itself)") orelse (b.dep_prefix.len == 0);
+    const brdf_lut_settings = try readBrdfLutBuildSettings(b);
 
     // == Dependencies ==
 
@@ -35,7 +60,11 @@ pub fn build(b: *Build) !void {
         .imports = &.{.{ .name = "sokol", .module = dep_sokol.module("sokol") }},
     });
 
-    const root_mod = b.createModule(.{
+    const brdf_lut_mod = addEmbeddedBrdfLutModule(b, target, optimize, brdf_lut_settings);
+
+    // Public framework module for downstream projects:
+    //   exe.root_module.addImport("zupra", zupra_dep.module("zupra"));
+    const root_mod = b.addModule("zupra", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
@@ -45,6 +74,7 @@ pub fn build(b: *Build) !void {
             .{ .name = "zmesh", .module = zmesh.module("root") },
             .{ .name = "zmath", .module = zmath.module("root") },
             .{ .name = "shaders", .module = shaders_mod },
+            .{ .name = "brdf_lut", .module = brdf_lut_mod },
         },
     });
 
@@ -141,19 +171,26 @@ pub fn build(b: *Build) !void {
         zmesh.artifact("zmesh").root_module.addSystemIncludePath(sysroot_include);
     } else {
         compile_step.is_linking_libc = true;
+        // Keep the public module self-contained when an application imports it
+        // instead of using this package's own executable target.
+        root_mod.link_libc = true;
     }
 
-    compile_step.root_module.linkLibrary(zmesh.artifact("zmesh"));
+    // The linkage belongs to the public module, not only this package's own
+    // artifact. That lets a consuming executable inherit zmesh correctly.
+    root_mod.linkLibrary(zmesh.artifact("zmesh"));
 
-    try compileShaders(b, compile_step, dep_sokol, "shaders");
-    try compileShaders(b, compile_step, dep_sokol, "examples/assets/shaders");
+    if (regenerate_shaders) {
+        try compileShaders(b, compile_step, dep_sokol, "shaders");
+        if (build_example) {
+            try compileShaders(b, compile_step, dep_sokol, "examples/assets/shaders");
+        }
+    }
     // Expose include shaders to the outside.
     const shader_includes = b.addNamedWriteFiles("shader-includes");
     _ = shader_includes.addCopyFile(b.path("shaders/material_surface.glsl.inc"), "material_surface.glsl.inc");
     _ = shader_includes.addCopyFile(b.path("shaders/material_alpha.glsl.inc"), "material_alpha.glsl.inc");
     _ = shader_includes.addCopyFile(b.path("shaders/pbr_lib.glsl.inc"), "pbr_lib.glsl.inc");
-
-    bakeBrdfLut(b, &target, compile_step);
 
     // Keep the framework's pure renderer/asset tests runnable with the same
     // module graph as the application. Direct `zig test src/...` invocations
@@ -198,8 +235,9 @@ fn buildWeb(b: *Build, lib: *std.Build.Step.Compile, root: *Build.Module, dep_so
 fn compileShaders(b: *Build, compile_step: *std.Build.Step.Compile, dep_sokol: *Build.Dependency, shader_dir_path: []const u8) !void {
     const dep_shdc = dep_sokol.builder.dependency("shdc", .{});
     const io = b.graph.io;
-    const cwd = std.Io.Dir.cwd();
-    var dir = try cwd.openDir(io, shader_dir_path, .{ .iterate = true });
+    // A dependency's build script runs with the consuming application's working
+    // directory. Resolve shader folders from this package instead.
+    var dir = try b.build_root.handle.openDir(io, shader_dir_path, .{ .iterate = true });
     defer dir.close(io);
 
     // Pass 1: collect every .inc include (shared shader libs).
@@ -277,30 +315,83 @@ pub fn addShader(
     return out;
 }
 
-// --- pbr baking ---
+// --- embedded BRDF LUT ---
 
-fn bakeBrdfLut(b: *Build, target: *const Build.ResolvedTarget, compile_step: *Build.Step.Compile) void {
-    // BRDF LUT bake
-    const io = b.graph.io;
-    const lut_path = "resources/brdf.lut";
-    const needs_bake = blk: {
-        std.Io.Dir.cwd().access(io, lut_path, .{}) catch {
-            break :blk true;
-        };
-        break :blk false;
+fn readBrdfLutBuildSettings(b: *Build) !BrdfLutBuildSettings {
+    const settings = BrdfLutBuildSettings{
+        .resolution = b.option(u32, "brdf_lut_resolution", "Embedded BRDF LUT width/height (default: 512)") orelse 512,
+        .sample_count = b.option(u32, "brdf_lut_samples", "GGX samples per BRDF LUT texel when baking a custom LUT (default: 4096)") orelse 4096,
     };
 
-    if (needs_bake) {
-        const gen_brdf_exe = b.addExecutable(.{
-            .name = "gen_brdf",
-            .root_module = b.createModule(.{
-                .root_source_file = b.path("tools/brdflut_backer.zig"),
-                .target = target.*,
-                .optimize = .ReleaseFast,
-            }),
-        });
-        const gen_brdf_run = b.addRunArtifact(gen_brdf_exe);
-        gen_brdf_run.setCwd(b.path("."));
-        compile_step.step.dependOn(&gen_brdf_run.step);
+    // Non-power-of-two dimensions are valid GPU texture sizes, but zero, very
+    // large images, and empty integration loops are invariably configuration
+    // errors. The cap also prevents an accidental build option from allocating
+    // an impractical amount of memory in the host-side baker.
+    if (settings.resolution == 0 or settings.resolution > 4096) {
+        std.log.err("brdf_lut_resolution must be in 1..4096, got {d}", .{settings.resolution});
+        return error.InvalidBrdfLutResolution;
     }
+    if (settings.sample_count == 0 or settings.sample_count > 65_536) {
+        std.log.err("brdf_lut_samples must be in 1..65536, got {d}", .{settings.sample_count});
+        return error.InvalidBrdfLutSampleCount;
+    }
+    return settings;
+}
+
+/// Make an internal module whose sibling LUT is embedded at compile time.
+///
+/// The default is the checked-in high-quality asset, keeping normal builds
+/// instant. A non-default setting runs the host-side baker into Zig's cache;
+/// it never overwrites the package source tree and its output is keyed by the
+/// selected dimensions/sample count. In both cases the final executable owns
+/// the bytes, so it works from any working directory and on every target.
+fn addEmbeddedBrdfLutModule(
+    b: *Build,
+    target: Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    settings: BrdfLutBuildSettings,
+) *Build.Module {
+    const lut = if (settings.isDefault())
+        b.path("resources/brdf.lut")
+    else
+        bakeCustomBrdfLut(b, settings);
+
+    // @embedFile resolves relative to the source file declaring it. Stage both
+    // generated source and LUT into one cache directory so that relationship is
+    // explicit in the build graph rather than depending on the process CWD.
+    const stage = b.addWriteFiles();
+    _ = stage.addCopyFile(lut, "brdf.lut");
+    const source = stage.add("brdf_lut.zig", b.fmt(
+        \\pub const resolution: u32 = {d};
+        \\pub const sample_count: u32 = {d};
+        \\pub const bytes: []const u8 = @embedFile("brdf.lut");
+    , .{ settings.resolution, settings.sample_count }));
+
+    return b.createModule(.{
+        .root_source_file = source,
+        .target = target,
+        .optimize = optimize,
+    });
+}
+
+fn bakeCustomBrdfLut(b: *Build, settings: BrdfLutBuildSettings) Build.LazyPath {
+    // This is a build-time executable and must run on the host even when the
+    // game itself is being cross-compiled for web, Android, or iOS.
+    const baker = b.addExecutable(.{
+        .name = "zupra_brdf_lut_baker",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/brdflut_backer.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseFast,
+        }),
+    });
+    const run = b.addRunArtifact(baker);
+    run.addArgs(&.{
+        "--resolution",
+        b.fmt("{d}", .{settings.resolution}),
+        "--samples",
+        b.fmt("{d}", .{settings.sample_count}),
+        "--output",
+    });
+    return run.addOutputFileArg("brdf.lut");
 }

@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const sg = @import("sokol").gfx;
+const brdf_lut = @import("brdf_lut");
 const zupra = @import("../root.zig");
 const math = @import("../math.zig");
 const zm = math.zm;
@@ -61,8 +62,11 @@ pub const Ibl = struct {
     brdf_lut_view: sg.View,
     tri: FullscreenTriangle,
 
-    pub fn init(allocator: std.mem.Allocator, cache: *PipelineCache) Ibl {
-        const brdf = loadBrdfLut(allocator);
+    /// The allocator remains part of the public signature for source
+    /// compatibility. The BRDF LUT is now embedded by build.zig, so it no
+    /// longer needs a runtime file allocation or a working-directory lookup.
+    pub fn init(_: std.mem.Allocator, cache: *PipelineCache) Ibl {
+        const brdf = loadBrdfLut();
         return .{
             .cache = cache,
             .brdf_lut_img = brdf.img,
@@ -223,47 +227,35 @@ pub const Ibl = struct {
     }
 };
 
-const brdf_lut_size = 512; // must match tools/brdflut_backer.zig LUT_SIZE
-const brdf_lut_path = "resources/brdf.lut";
-
 const BrdfLut = struct { img: sg.Image, view: sg.View };
 
-/// Load the precomputed split-sum BRDF LUT (raw RG f16, row-major, no header).
-/// On failure, fall back to a 1x1 (1,0) texel so the binding stays valid (the
-/// specular IBL degrades but nothing crashes).
-fn loadBrdfLut(allocator: std.mem.Allocator) BrdfLut {
-    const bytes = readBrdfFile(allocator) catch |err| {
-        std.log.err("Ibl: could not load {s}: {} — specular IBL will be approximate", .{ brdf_lut_path, err });
-        return makeBrdfFallback();
-    };
-    defer allocator.free(bytes);
-
-    const expected = brdf_lut_size * brdf_lut_size * 2 * 2; // RG * f16
+/// Upload the build-embedded split-sum BRDF LUT (raw RG f16, row-major, no
+/// header). Embedding makes the renderer independent of the executable's
+/// current working directory and supports packaged desktop, web, and mobile
+/// builds without a separate deployment rule.
+fn loadBrdfLut() BrdfLut {
+    const bytes = brdf_lut.bytes;
+    const resolution: usize = brdf_lut.resolution;
+    const expected = resolution * resolution * 2 * @sizeOf(f16); // RG * f16
     if (bytes.len != expected) {
-        std.log.err("Ibl: {s} is {d} bytes, expected {d} — using fallback", .{ brdf_lut_path, bytes.len, expected });
+        std.log.err("Ibl: embedded {d}x{d} BRDF LUT is {d} bytes, expected {d} — using fallback", .{
+            brdf_lut.resolution,
+            brdf_lut.resolution,
+            bytes.len,
+            expected,
+        });
         return makeBrdfFallback();
     }
 
     var desc = sg.ImageDesc{
-        .width = brdf_lut_size,
-        .height = brdf_lut_size,
+        .width = brdf_lut.resolution,
+        .height = brdf_lut.resolution,
         .pixel_format = .RG16F,
         .usage = .{ .immutable = true },
     };
     desc.data.mip_levels[0] = .{ .ptr = bytes.ptr, .size = bytes.len };
     const img = sg.makeImage(desc);
     return .{ .img = img, .view = sg.makeView(.{ .texture = .{ .image = img } }) };
-}
-
-fn readBrdfFile(allocator: std.mem.Allocator) ![]u8 {
-    const io = zupra.getIo();
-    const file = try std.Io.Dir.cwd().openFile(io, brdf_lut_path, .{});
-    defer file.close(io);
-    var file_reader = file.reader(io, &.{});
-    return try file_reader.interface.allocRemaining(
-        allocator,
-        .limited(8 * 1024 * 1024),
-    );
 }
 
 fn makeBrdfFallback() BrdfLut {
@@ -295,4 +287,13 @@ fn facePass(attachment: sg.View) sg.Pass {
     var action = sg.PassAction{};
     action.colors[0] = .{ .load_action = .CLEAR, .clear_value = .{ .r = 0, .g = 0, .b = 0, .a = 1 } };
     return .{ .action = action, .attachments = att };
+}
+
+test "embedded BRDF LUT matches its generated settings" {
+    const resolution: usize = brdf_lut.resolution;
+    try std.testing.expect(resolution > 0);
+    try std.testing.expectEqual(
+        resolution * resolution * 2 * @sizeOf(f16),
+        brdf_lut.bytes.len,
+    );
 }
