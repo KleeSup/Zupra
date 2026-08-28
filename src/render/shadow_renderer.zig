@@ -21,9 +21,12 @@ const Camera3D = @import("camera3d.zig").Camera3D;
 const zupra = @import("../root.zig");
 
 const shd_depth = @import("shaders").shadow_depth;
+const shd_depth_skinned = @import("shaders").shadow_depth_skinned;
 const shd_depth_inst = @import("shaders").shadow_depth_instanced;
 const shd_depth_alpha = @import("shaders").shadow_depth_alpha;
+const shd_depth_alpha_skinned = @import("shaders").shadow_depth_alpha_skinned;
 const shd_clear = @import("shaders").shadow_clear;
+const skeletal = @import("skeletal.zig");
 
 const Matrix = math.Matrix;
 const Vec3 = math.Vec3;
@@ -147,7 +150,9 @@ pub const ShadowRenderer = struct {
     cache: *PipelineCache,
     atlas: ShadowAtlas,
     shader: sg.Shader,
+    skinned_shader: sg.Shader,
     alpha_shader: sg.Shader,
+    skinned_alpha_shader: sg.Shader,
     clear_shader: sg.Shader,
     clear_triangle: FullscreenTriangle,
     material_sampler: sg.Sampler,
@@ -195,7 +200,9 @@ pub const ShadowRenderer = struct {
             .usage = .{ .vertex_buffer = true, .stream_update = true },
         });
         const shader = sg.makeShader(shd_depth.shadowDepthShaderDesc(sg.queryBackend()));
+        const skinned_shader = sg.makeShader(shd_depth_skinned.shadowDepthSkinnedShaderDesc(sg.queryBackend()));
         const alpha_shader = sg.makeShader(shd_depth_alpha.shadowDepthAlphaShaderDesc(sg.queryBackend()));
+        const skinned_alpha_shader = sg.makeShader(shd_depth_alpha_skinned.shadowDepthAlphaSkinnedShaderDesc(sg.queryBackend()));
         const clear_shader = sg.makeShader(shd_clear.shadowClearShaderDesc(sg.queryBackend()));
         const clear_triangle = FullscreenTriangle.init();
         // Diagnostic: if the depth-only shader failed to compile, every shadow
@@ -217,7 +224,9 @@ pub const ShadowRenderer = struct {
             .cache = cache,
             .atlas = try ShadowAtlas.init(allocator, opts),
             .shader = shader,
+            .skinned_shader = skinned_shader,
             .alpha_shader = alpha_shader,
+            .skinned_alpha_shader = skinned_alpha_shader,
             .clear_shader = clear_shader,
             .clear_triangle = clear_triangle,
             .material_sampler = sg.makeSampler(.{
@@ -243,7 +252,9 @@ pub const ShadowRenderer = struct {
         sg.destroySampler(self.material_sampler);
         sg.destroyBuffer(self.inst_buf);
         sg.destroyShader(self.inst_shader);
+        sg.destroyShader(self.skinned_alpha_shader);
         sg.destroyShader(self.alpha_shader);
+        sg.destroyShader(self.skinned_shader);
         sg.destroyShader(self.shader);
     }
 
@@ -894,6 +905,7 @@ pub const ShadowRenderer = struct {
     /// drawShadowCasters callback for each casting instance. Position-only — no
     /// material, no fragment work beyond depth.
     pub fn drawMesh(self: *ShadowRenderer, mesh: Mesh, model: Matrix, view_proj: Matrix, depth_bias: f32, slope_bias: f32, cull: sg.CullMode, sig: PassSignature) void {
+        if (mesh.isSkinned()) return;
         var key = PipelineKey{
             .shader = self.shader,
             .layout = .mesh, // reuse mesh layout; only pos is consumed
@@ -929,6 +941,48 @@ pub const ShadowRenderer = struct {
         sg.draw(0, mesh.index_count, 1);
     }
 
+    /// Animated casters cannot use the static instancing path: every animated
+    /// instance has a different current joint palette, and sharing one would
+    /// freeze or cross-wire their shadows. They remain one draw per caster.
+    pub fn drawMeshSkinned(
+        self: *ShadowRenderer,
+        mesh: Mesh,
+        model: Matrix,
+        skin: skeletal.Binding,
+        view_proj: Matrix,
+        depth_bias: f32,
+        slope_bias: f32,
+        cull: sg.CullMode,
+        sig: PassSignature,
+    ) void {
+        if (!mesh.isSkinned()) return;
+        var key = PipelineKey{
+            .shader = self.skinned_shader,
+            .layout = .mesh_skinned,
+            .index_type = mesh.index_type,
+            .indexed = true,
+            .pass = sig,
+            .primitive = .TRIANGLES,
+            .cull = cull,
+            .blend = .none,
+            .depth_test = true,
+            .depth_write = true,
+        };
+        key.setDepthBias(depth_bias, slope_bias, 0.0);
+        const pip = self.cache.get(key) catch return;
+
+        var vs = shd_depth_skinned.VsParams{ .mvp = matToArr(zm.mul(model, view_proj)) };
+        var bindings = sg.Bindings{};
+        bindings.vertex_buffers[0] = mesh.vbuf;
+        bindings.index_buffer = mesh.ibuf;
+        bindings.views[skeletal.palette_view_slot] = skin.palette;
+        bindings.samplers[skeletal.palette_sampler_slot] = skin.sampler;
+        sg.applyPipeline(pip);
+        sg.applyBindings(bindings);
+        sg.applyUniforms(shd_depth_skinned.UB_vs_params, sg.asRange(&vs));
+        sg.draw(0, mesh.index_count, 1);
+    }
+
     /// Draw one alpha-masked mesh into the current caster tile. Unlike the
     /// opaque instanced path this samples the glTF base-colour texture and
     /// rejects fragments below alphaCutoff, so it intentionally remains one
@@ -945,6 +999,7 @@ pub const ShadowRenderer = struct {
         sig: PassSignature,
     ) void {
         std.debug.assert(material.alpha_mode == .mask);
+        if (mesh.isSkinned()) return;
 
         var key = PipelineKey{
             .shader = self.alpha_shader,
@@ -984,6 +1039,60 @@ pub const ShadowRenderer = struct {
         sg.applyUniforms(shd_depth_alpha.UB_fs_params, sg.asRange(&fs));
         var uvp = mesh_mod.uvParams(material);
         sg.applyUniforms(shd_depth_alpha.UB_uv_params, sg.asRange(&uvp));
+        sg.draw(0, mesh.index_count, 1);
+    }
+
+    pub fn drawMeshAlphaMaskedSkinned(
+        self: *ShadowRenderer,
+        mesh: Mesh,
+        model: Matrix,
+        material: Material,
+        skin: skeletal.Binding,
+        view_proj: Matrix,
+        depth_bias: f32,
+        slope_bias: f32,
+        cull: sg.CullMode,
+        sig: PassSignature,
+    ) void {
+        std.debug.assert(material.alpha_mode == .mask);
+        if (!mesh.isSkinned()) return;
+        var key = PipelineKey{
+            .shader = self.skinned_alpha_shader,
+            .layout = .mesh_skinned,
+            .index_type = mesh.index_type,
+            .indexed = true,
+            .pass = sig,
+            .primitive = .TRIANGLES,
+            .cull = cull,
+            .blend = .none,
+            .depth_test = true,
+            .depth_write = true,
+        };
+        key.setDepthBias(depth_bias, slope_bias, 0.0);
+        const pip = self.cache.get(key) catch return;
+
+        var vs = shd_depth_alpha_skinned.VsParams{
+            .mvp = matToArr(zm.mul(model, view_proj)),
+            .uv_scale = .{ material.uv_scale[0], material.uv_scale[1], 0, 0 },
+        };
+        const base_color = material.base_color;
+        var fs = shd_depth_alpha_skinned.FsParams{
+            .base_color = .{ base_color.r, base_color.g, base_color.b, base_color.a },
+            .alpha_params = material.alphaTestParams(),
+        };
+        var bindings = sg.Bindings{};
+        bindings.vertex_buffers[0] = mesh.vbuf;
+        bindings.index_buffer = mesh.ibuf;
+        bindings.views[shd_depth_alpha_skinned.VIEW_base_color_map] = material.map(.base_color).view;
+        bindings.samplers[shd_depth_alpha_skinned.SMP_smp_material] = material.sampler orelse self.material_sampler;
+        bindings.views[skeletal.palette_view_slot] = skin.palette;
+        bindings.samplers[skeletal.palette_sampler_slot] = skin.sampler;
+        sg.applyPipeline(pip);
+        sg.applyBindings(bindings);
+        sg.applyUniforms(shd_depth_alpha_skinned.UB_vs_params, sg.asRange(&vs));
+        sg.applyUniforms(shd_depth_alpha_skinned.UB_fs_params, sg.asRange(&fs));
+        var uvp = mesh_mod.uvParams(material);
+        sg.applyUniforms(shd_depth_alpha_skinned.UB_uv_params, sg.asRange(&uvp));
         sg.draw(0, mesh.index_count, 1);
     }
 
@@ -1054,14 +1163,39 @@ pub const ShadowRenderer = struct {
     }
 
     pub fn drawModel(self: *ShadowRenderer, inst: ModelInstance, view_proj: Matrix, depth_bias: f32, slope_bias: f32, sig: PassSignature) void {
-        const m = inst.modelMatrix();
         for (inst.model.meshes, 0..) |submesh, i| {
+            const m = inst.meshModelMatrix(submesh, false);
             const material = inst.model.materials[inst.model.mesh_material[i]];
             // A blend material has no binary coverage to put in a depth shadow
             // map. Masked materials do, but must sample their base-colour alpha
             // just like SceneRenderer's shadow queue does.
             if (material.alpha_mode == .blend) continue;
-            if (material.alpha_mode == .mask) {
+            if (inst.skinning(submesh)) |skin| {
+                if (material.alpha_mode == .mask) {
+                    self.drawMeshAlphaMaskedSkinned(
+                        submesh,
+                        m,
+                        material,
+                        skin,
+                        view_proj,
+                        depth_bias,
+                        slope_bias,
+                        material.cullMode(),
+                        sig,
+                    );
+                } else {
+                    self.drawMeshSkinned(
+                        submesh,
+                        m,
+                        skin,
+                        view_proj,
+                        depth_bias,
+                        slope_bias,
+                        material.cullMode(),
+                        sig,
+                    );
+                }
+            } else if (material.alpha_mode == .mask) {
                 self.drawMeshAlphaMasked(
                     submesh,
                     m,

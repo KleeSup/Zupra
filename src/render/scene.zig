@@ -61,6 +61,7 @@ const XGtao = @import("xegtao.zig").XeGtao;
 const Bloom = @import("render.zig").Bloom;
 const Taa = @import("taa.zig").Taa;
 const VelocityPass = @import("velocity.zig").VelocityPass;
+const skeletal = @import("skeletal.zig");
 
 const ShadowRenderer = @import("shadow_renderer.zig").ShadowRenderer;
 const ShadowParams = @import("shaders").mesh.ShadowParams;
@@ -72,6 +73,7 @@ const TransparentEntry = struct {
     mesh: Mesh,
     model: Matrix,
     material: Material,
+    skin: ?skeletal.Binding = null,
     depth: f32, // squared distance to camera, for back-to-front sort
     bounds: Sphere,
 };
@@ -123,6 +125,7 @@ const ShadowSubmission = struct {
     mesh: Mesh,
     model: Matrix,
     material: Material,
+    skin: ?skeletal.Binding = null,
     bounds: Sphere,
     /// Sort key. Opaque depth ignores material, but the key must preserve the
     /// full indexed geometry identity: two submeshes may share vertex storage
@@ -137,6 +140,7 @@ const OpaqueEntry = struct {
     mesh: Mesh,
     model: Matrix,
     material: Material,
+    skin: ?skeletal.Binding = null,
     bounds: Sphere,
     /// Squared distance to the camera, for front-to-back ordering. Already
     /// computed for the transparent sort, so carrying it costs nothing.
@@ -154,6 +158,7 @@ const ForwardEntry = struct {
     mesh: Mesh,
     model: Matrix,
     material: Material,
+    skin: ?skeletal.Binding = null,
 };
 
 const MovedEntry = struct {
@@ -161,6 +166,7 @@ const MovedEntry = struct {
     model: Matrix,
     prev_model: Matrix,
     material: Material,
+    skin: ?skeletal.Binding = null,
 };
 
 pub const SceneRenderer = struct {
@@ -471,8 +477,19 @@ pub const SceneRenderer = struct {
     /// submission only records what to draw, and end() runs the passes in
     /// dependency order.
     pub fn draw(self: *SceneRenderer, inst: ModelInstance) void {
+        self.submitInstance(inst, null);
+    }
+
+    /// Submit a moved external instance. Skinned meshes are automatically put
+    /// into the velocity path even through ordinary draw(), but this overload
+    /// adds root-transform motion on top of their bone motion.
+    pub fn drawMoved(self: *SceneRenderer, inst: ModelInstance, prev_model: Matrix) void {
+        self.submitInstance(inst, prev_model);
+    }
+
+    fn submitInstance(self: *SceneRenderer, inst: ModelInstance, previous_external: ?Matrix) void {
         const model_matrix = inst.modelMatrix();
-        self.enqueueShadowCasters(inst, model_matrix);
+        self.enqueueShadowCasters(inst);
 
         const dx = self.camera.position.x - inst.position.x;
         const dy = self.camera.position.y - inst.position.y;
@@ -482,24 +499,46 @@ pub const SceneRenderer = struct {
         const model = inst.model;
         for (model.meshes, 0..) |submesh, i| {
             const material = model.materials[model.mesh_material[i]];
+            const skin = inst.skinning(submesh);
+            if (submesh.isSkinned() and skin == null) {
+                zupra.log.warn("SceneRenderer: skipped skinned mesh without an Animator", .{});
+                continue;
+            }
+            const mesh_matrix = inst.meshModelMatrixWithInstance(submesh, model_matrix, false);
 
-            const bounds = submesh.bounds.transform(model_matrix);
+            // A bind-pose bound cannot safely cull a deforming limb. The empty
+            // sentinel intentionally bypasses camera/shadow culling until the
+            // asset path grows conservative per-joint bounds.
+            const bounds = if (submesh.isSkinned()) Sphere.empty else submesh.bounds.transform(mesh_matrix);
 
             if (material.alpha_mode == .blend) {
                 self.transparent.append(self.allocator, .{
                     .mesh = submesh,
-                    .model = model_matrix,
+                    .model = mesh_matrix,
                     .material = material,
+                    .skin = skin,
                     .depth = depth,
                     .bounds = bounds,
                 }) catch {};
             } else {
                 self.opaque_queue.append(self.allocator, .{
                     .mesh = submesh,
-                    .model = model_matrix,
+                    .model = mesh_matrix,
                     .material = material,
+                    .skin = skin,
                     .bounds = bounds,
                     .depth = depth,
+                }) catch {};
+            }
+
+            if (skin != null or previous_external != null) {
+                const previous_instance = previous_external orelse model_matrix;
+                self.moved_queue.append(self.allocator, .{
+                    .mesh = submesh,
+                    .model = mesh_matrix,
+                    .prev_model = inst.meshModelMatrixWithInstance(submesh, previous_instance, skin != null),
+                    .material = material,
+                    .skin = skin,
                 }) catch {};
             }
         }
@@ -509,7 +548,7 @@ pub const SceneRenderer = struct {
     /// object outside the visible camera frustum: it cannot affect the colour
     /// or velocity buffers, but may still project a shadow into them.
     pub fn drawShadowOnly(self: *SceneRenderer, inst: ModelInstance) void {
-        self.enqueueShadowCasters(inst, inst.modelMatrix());
+        self.enqueueShadowCasters(inst);
     }
 
     /// Invalidate persistent caster depth after begin() has already built the
@@ -529,7 +568,7 @@ pub const SceneRenderer = struct {
     /// Per-submesh rather than per-instance so a multi-material model's parts
     /// batch with matching geometry elsewhere in the scene, and so culling
     /// works at the granularity that is actually drawn.
-    fn enqueueShadowCasters(self: *SceneRenderer, inst: ModelInstance, model_matrix: Matrix) void {
+    fn enqueueShadowCasters(self: *SceneRenderer, inst: ModelInstance) void {
 
         // World bounds once per submesh, reused by the shadow queue and by
         // camera culling. The shadow queue is deliberately NOT camera-culled:
@@ -550,32 +589,23 @@ pub const SceneRenderer = struct {
                 // shadow map. Do not turn glass/smoke into a fully opaque
                 // caster; use glTF MASK for cut-out shadow casters.
                 if (material.alpha_mode == .blend) continue;
+                const skin = inst.skinning(submesh);
+                if (submesh.isSkinned() and skin == null) continue;
+                // An Animator can change every frame even when the retained
+                // world object is nominally stationary. It must never reuse a
+                // cached tile from an older pose.
+                if (skin != null) self.invalidateCachedShadowsThisFrame();
+                const matrix = inst.meshModelMatrix(submesh, false);
                 self.shadow_queue.append(self.allocator, .{
                     .mesh = submesh,
-                    .model = model_matrix,
+                    .model = matrix,
                     .material = material,
-                    .bounds = submesh.bounds.transform(model_matrix),
+                    .skin = skin,
+                    .bounds = if (submesh.isSkinned()) Sphere.empty else submesh.bounds.transform(matrix),
                     .key = ShadowBatchKey.fromMesh(submesh),
-                    .cacheable = inst.shadow_cacheable,
+                    .cacheable = inst.shadow_cacheable and skin == null,
                 }) catch {};
             }
-        }
-    }
-
-    /// Submit an instance that moved since last frame, so the velocity pass can
-    /// record where it was. Only objects whose transform actually changed need
-    /// this, since a static object's motion is entirely accounted for by the
-    /// camera reprojection TAA already does.
-    pub fn drawMoved(self: *SceneRenderer, inst: ModelInstance, prev_model: Matrix) void {
-        self.draw(inst);
-        const model_matrix = inst.modelMatrix();
-        for (inst.model.meshes, 0..) |submesh, i| {
-            self.moved_queue.append(self.allocator, .{
-                .mesh = submesh,
-                .model = model_matrix,
-                .prev_model = prev_model,
-                .material = inst.model.materials[inst.model.mesh_material[i]],
-            }) catch {};
         }
     }
 
@@ -610,14 +640,30 @@ pub const SceneRenderer = struct {
         const items = self.shadow_queue.items;
         var i: usize = 0;
         while (i < items.len) {
+            // A skin palette is per animated instance, so it cannot join the
+            // static geometry batch even when its buffers happen to match.
+            if (items[i].skin) |skin| {
+                const item = items[i];
+                if (item.bounds.isEmpty() or frustum.intersectsSphere(item.bounds)) {
+                    self.shadow_draws += 1;
+                    self.shadow_instances += 1;
+                    if (item.material.alpha_mode == .mask) {
+                        shadows.drawMeshAlphaMaskedSkinned(item.mesh, item.model, item.material, skin, view_proj, bias, slope, cull, sig);
+                    } else {
+                        shadows.drawMeshSkinned(item.mesh, item.model, skin, view_proj, bias, slope, cull, sig);
+                    }
+                }
+                i += 1;
+                continue;
+            }
             // The queue was sorted by geometry in end(), so a run of equal keys
             // is contiguous and can be found by scanning forward.
             const key = items[i].key;
             var j = i;
             self.instance_scratch.clearRetainingCapacity();
-            while (j < items.len and items[j].key.eql(key)) : (j += 1) {
+            while (j < items.len and items[j].skin == null and items[j].key.eql(key)) : (j += 1) {
                 const item = items[j];
-                if (!frustum.intersectsSphere(item.bounds)) continue;
+                if (!item.bounds.isEmpty() and !frustum.intersectsSphere(item.bounds)) continue;
                 if (item.cacheable) self.shadow_static_instances += 1;
 
                 if (item.material.alpha_mode == .mask) {
@@ -654,11 +700,14 @@ pub const SceneRenderer = struct {
         }
     }
 
-    fn drawOpaque(self: *SceneRenderer, mesh: Mesh, model: Matrix, material: Material) void {
+    fn drawOpaque(self: *SceneRenderer, mesh: Mesh, model: Matrix, material: Material, skin: ?skeletal.Binding) void {
         switch (self.mode) {
             .deferred => {
                 if (material.shading == .pbr and !material.requiresForward()) {
-                    self.geo.drawMesh(mesh, model, material); // G-buffer (PBR lighting)
+                    if (skin) |binding|
+                        self.geo.drawSkinned(mesh, model, material, binding)
+                    else
+                        self.geo.drawMesh(mesh, model, material); // G-buffer (PBR lighting)
                 } else {
                     // Forward-shaded after the lighting pass (respects shading model,
                     // and custom shaders that don't write the G-buffer layout).
@@ -666,10 +715,14 @@ pub const SceneRenderer = struct {
                         .mesh = mesh,
                         .model = model,
                         .material = material,
+                        .skin = skin,
                     }) catch {};
                 }
             },
-            .forward => self.forward.draw(mesh, model, material),
+            .forward => if (skin) |binding|
+                self.forward.drawSkinned(mesh, model, material, binding)
+            else
+                self.forward.draw(mesh, model, material),
         }
     }
 
@@ -734,7 +787,10 @@ pub const SceneRenderer = struct {
                     self.prepass.begin(self.camera, self.prepass_fb.passSignature());
                     for (self.opaque_queue.items) |e| {
                         if (!self.visible(e.bounds)) continue;
-                        self.prepass.draw(e.mesh, e.model, e.material);
+                        if (e.skin) |binding|
+                            self.prepass.drawSkinned(e.mesh, e.model, e.material, binding)
+                        else
+                            self.prepass.draw(e.mesh, e.model, e.material);
                     }
                     self.prepass.end();
                     zupra.endDrawing();
@@ -782,7 +838,7 @@ pub const SceneRenderer = struct {
         for (self.opaque_queue.items) |e| {
             if (!self.visible(e.bounds)) continue;
             self.visible_draws += 1;
-            self.drawOpaque(e.mesh, e.model, e.material);
+            self.drawOpaque(e.mesh, e.model, e.material, e.skin);
         }
 
         // 3) Resolve lighting and composite.
@@ -827,7 +883,10 @@ pub const SceneRenderer = struct {
         if (self.isTaaActive()) {
             self.velocity.begin(self.camera, self.opaqueDepthView());
             for (self.moved_queue.items) |e| {
-                self.velocity.draw(e.mesh, e.model, e.prev_model, e.material);
+                if (e.skin) |binding|
+                    self.velocity.drawSkinned(e.mesh, e.model, e.prev_model, e.material, binding)
+                else
+                    self.velocity.draw(e.mesh, e.model, e.prev_model, e.material);
             }
             self.velocity.end();
             hdr = self.taa.resolve(
@@ -883,7 +942,10 @@ pub const SceneRenderer = struct {
             for (self.transparent.items) |e| {
                 if (!self.visible(e.bounds)) continue;
                 self.visible_draws += 1;
-                self.forward.draw(e.mesh, e.model, e.material);
+                if (e.skin) |binding|
+                    self.forward.drawSkinned(e.mesh, e.model, e.material, binding)
+                else
+                    self.forward.draw(e.mesh, e.model, e.material);
             }
             self.forward.end();
         }
@@ -935,7 +997,10 @@ pub const SceneRenderer = struct {
         const sig = self.scene_color.passSignatureWith(.DEPTH);
         self.forward.beginEx(self.camera, self.env, sig);
         for (self.forward_opaque.items) |e| {
-            self.forward.draw(e.mesh, e.model, e.material);
+            if (e.skin) |binding|
+                self.forward.drawSkinned(e.mesh, e.model, e.material, binding)
+            else
+                self.forward.draw(e.mesh, e.model, e.material);
         }
         self.forward.end();
         zupra.endDrawing();

@@ -26,10 +26,15 @@ const lighting_mod = @import("lighting.zig");
 const Camera3D = @import("camera3d.zig").Camera3D;
 
 const shd = @import("shaders").mesh;
+const shd_skinned = @import("shaders").mesh_skinned;
 const shd_unlit = @import("shaders").unlit;
+const shd_unlit_skinned = @import("shaders").unlit_skinned;
 const shd_lambert = @import("shaders").lambert;
+const shd_lambert_skinned = @import("shaders").lambert_skinned;
+const skeletal = @import("skeletal.zig");
 
 const Vertex3D = gfx.Vertex3D;
+const VertexSkinned3D = gfx.VertexSkinned3D;
 const IndexData = gfx.IndexData;
 const IndexType = gfx.IndexType;
 const ShaderProgram = gfx.ShaderProgram;
@@ -53,8 +58,11 @@ const UnlitFs = shd_unlit.FsParams;
 
 const ShaderSet = struct {
     pbr: ShaderProgram,
+    pbr_skinned: ShaderProgram,
     lambert: ShaderProgram,
+    lambert_skinned: ShaderProgram,
     unlit: ShaderProgram,
+    unlit_skinned: ShaderProgram,
 };
 
 pub fn uvParams(m: Material) UvParams {
@@ -78,13 +86,25 @@ pub fn sharedShaders() ShaderSet {
                 .layout = .mesh,
                 .slots = .{ .vs_params = shd.UB_vs_params, .fs_params = shd.UB_fs_params },
             }),
+            .pbr_skinned = ShaderProgram.init(shd_skinned.meshSkinnedShaderDesc, .{
+                .layout = .mesh_skinned,
+                .slots = .{ .vs_params = shd_skinned.UB_vs_params, .fs_params = shd_skinned.UB_fs_params },
+            }),
             .lambert = ShaderProgram.init(shd_lambert.lambertShaderDesc, .{
                 .layout = .mesh,
                 .slots = .{ .vs_params = shd_lambert.UB_vs_params, .fs_params = shd_lambert.UB_fs_params },
             }),
+            .lambert_skinned = ShaderProgram.init(shd_lambert_skinned.lambertSkinnedShaderDesc, .{
+                .layout = .mesh_skinned,
+                .slots = .{ .vs_params = shd_lambert_skinned.UB_vs_params, .fs_params = shd_lambert_skinned.UB_fs_params },
+            }),
             .unlit = ShaderProgram.init(shd_unlit.unlitShaderDesc, .{
                 .layout = .mesh,
                 .slots = .{ .vs_params = shd_unlit.UB_vs_params, .fs_params = shd_unlit.UB_fs_params },
+            }),
+            .unlit_skinned = ShaderProgram.init(shd_unlit_skinned.unlitSkinnedShaderDesc, .{
+                .layout = .mesh_skinned_unlit,
+                .slots = .{ .vs_params = shd_unlit_skinned.UB_vs_params, .fs_params = shd_unlit_skinned.UB_fs_params },
             }),
         };
     }
@@ -94,8 +114,11 @@ pub fn sharedShaders() ShaderSet {
 pub fn deinitShared() void {
     if (shared_set) |*s| {
         s.pbr.deinit();
+        s.pbr_skinned.deinit();
         s.lambert.deinit();
+        s.lambert_skinned.deinit();
         s.unlit.deinit();
+        s.unlit_skinned.deinit();
         shared_set = null;
     }
 }
@@ -112,6 +135,20 @@ pub const Mesh = struct {
     /// guaranteed to be in hand -- it goes into an immutable GPU buffer
     /// immediately after and can never be read back.
     bounds: Sphere = .empty,
+
+    /// Present only on geometry loaded from a glTF skin. The value indexes the
+    /// per-instance palette created by `skeletal.Animator`; static meshes stay
+    /// entirely on the compact Vertex3D path.
+    skin_palette_index: ?u32 = null,
+    /// Node whose world transform places this primitive. Kept as an index into
+    /// the model's retained glTF node table, not as a pointer into cgltf data
+    /// (which is released as soon as loading completes).
+    skin_node_index: ?u32 = null,
+    /// Raw glTF-basis node world transform captured at load time. It is used
+    /// only as the bind-pose fallback when a skinned instance has not yet been
+    /// given an Animator; the animated path asks the Animator for this frame's
+    /// matching node world instead.
+    skin_bind_world: Matrix = math.zm.identity(),
 
     /// `vertices` and `indices` are copied into immutable GPU buffers, so the
     /// caller's data may be freed afterward. The index width is taken from the
@@ -141,6 +178,43 @@ pub const Mesh = struct {
             .bounds = Sphere.fromVertices(Vertex3D, vertices),
             .index_type = std.meta.activeTag(indices),
         };
+    }
+
+    /// Upload a skin-capable stream. Animated deformation makes a bind-pose
+    /// sphere unsafe for culling, so the bound is intentionally empty until
+    /// per-joint conservative bounds are added; empty bounds are treated as
+    /// visible by both camera and shadow culling.
+    pub fn initSkinned(vertices: []const VertexSkinned3D, indices: IndexData, palette_index: u32, node_index: u32, bind_world: Matrix) Mesh {
+        const vbuf = sg.makeBuffer(.{
+            .usage = .{ .vertex_buffer = true, .immutable = true },
+            .data = sg.asRange(vertices),
+        });
+
+        const idx_bytes: []const u8 = switch (indices) {
+            inline else => |s| std.mem.sliceAsBytes(s),
+        };
+        const idx_count: u32 = switch (indices) {
+            inline else => |s| @intCast(s.len),
+        };
+        const ibuf = sg.makeBuffer(.{
+            .usage = .{ .index_buffer = true, .immutable = true },
+            .data = .{ .ptr = idx_bytes.ptr, .size = idx_bytes.len },
+        });
+
+        return .{
+            .vbuf = vbuf,
+            .ibuf = ibuf,
+            .index_count = idx_count,
+            .index_type = std.meta.activeTag(indices),
+            .bounds = .empty,
+            .skin_palette_index = palette_index,
+            .skin_node_index = node_index,
+            .skin_bind_world = bind_world,
+        };
+    }
+
+    pub fn isSkinned(self: Mesh) bool {
+        return self.skin_palette_index != null and self.skin_node_index != null;
     }
 
     pub fn deinit(self: Mesh) void {
@@ -248,10 +322,38 @@ pub const MeshRenderer = struct {
     }
 
     pub fn draw(self: *MeshRenderer, mesh: Mesh, model: Matrix, material: Material) void {
+        self.drawInternal(mesh, model, material, null);
+    }
+
+    /// Draw one animated glTF primitive. Custom material shaders are intentionally
+    /// rejected here: their vertex-layout contract predates JOINTS_0/WEIGHTS_0,
+    /// and binding a skinned stream to one would read unrelated bytes as data.
+    pub fn drawSkinned(self: *MeshRenderer, mesh: Mesh, model: Matrix, material: Material, skin: skeletal.Binding) void {
+        self.drawInternal(mesh, model, material, skin);
+    }
+
+    fn drawInternal(self: *MeshRenderer, mesh: Mesh, model: Matrix, material: Material, skin: ?skeletal.Binding) void {
         std.debug.assert(self.active);
 
+        if (mesh.isSkinned() and skin == null) {
+            std.log.warn("MeshRenderer: skipped skinned mesh without an Animator palette", .{});
+            return;
+        }
+        if (!mesh.isSkinned() and skin != null) {
+            std.log.warn("MeshRenderer: refused skin palette on a static mesh", .{});
+            return;
+        }
+        if (skin != null and material.shader != null) {
+            std.log.warn("MeshRenderer: custom material shaders need an explicit skinned vertex variant", .{});
+            return;
+        }
+
         // Pick the shader for this material's shading model.
-        const shader: ShaderProgram = material.shader orelse switch (material.shading) {
+        const shader: ShaderProgram = if (skin != null) switch (material.shading) {
+            .pbr => self.shaders.pbr_skinned,
+            .lambert => self.shaders.lambert_skinned,
+            .unlit => self.shaders.unlit_skinned,
+        } else material.shader orelse switch (material.shading) {
             .pbr => self.shaders.pbr,
             .lambert => self.shaders.lambert,
             .unlit => self.shaders.unlit,
@@ -259,7 +361,9 @@ pub const MeshRenderer = struct {
 
         const key = PipelineKey{
             .shader = shader.handle,
-            .layout = if (material.shader) |s| s.layout else if (material.shading == .unlit) .mesh_unlit else .mesh,
+            .layout = if (skin != null)
+                if (material.shading == .unlit) .mesh_skinned_unlit else .mesh_skinned
+            else if (material.shader) |s| s.layout else if (material.shading == .unlit) .mesh_unlit else .mesh,
 
             .index_type = mesh.index_type,
             .pass = self.pass,
@@ -286,6 +390,10 @@ pub const MeshRenderer = struct {
         var bindings = sg.Bindings{};
         bindings.vertex_buffers[0] = mesh.vbuf;
         bindings.index_buffer = mesh.ibuf;
+        if (skin) |binding| {
+            bindings.views[skeletal.palette_view_slot] = binding.palette;
+            bindings.samplers[skeletal.palette_sampler_slot] = binding.sampler;
+        }
 
         var vs = VsParams{
             .model = @bitCast(model),

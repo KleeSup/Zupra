@@ -29,6 +29,8 @@ const fb = @import("framebuffer.zig");
 const Camera3D = @import("camera3d.zig").Camera3D;
 
 const shd = @import("shaders").velocity;
+const shd_skinned = @import("shaders").velocity_skinned;
+const skeletal = @import("skeletal.zig");
 
 const Matrix = math.Matrix;
 const Mesh = mesh_mod.Mesh;
@@ -56,6 +58,7 @@ const VelocityFsParams = extern struct {
 pub const VelocityPass = struct {
     cache: *PipelineCache,
     shader: sg.Shader,
+    skinned_shader: sg.Shader,
     material_sampler: sg.Sampler,
     target: Framebuffer = undefined,
 
@@ -75,6 +78,7 @@ pub const VelocityPass = struct {
         var self = VelocityPass{
             .cache = cache,
             .shader = sg.makeShader(shd.velocityShaderDesc(sg.queryBackend())),
+            .skinned_shader = sg.makeShader(shd_skinned.velocitySkinnedShaderDesc(sg.queryBackend())),
             .material_sampler = sg.makeSampler(.{
                 .min_filter = .LINEAR,
                 .mag_filter = .LINEAR,
@@ -91,6 +95,7 @@ pub const VelocityPass = struct {
     pub fn deinit(self: *VelocityPass) void {
         self.target.deinit();
         sg.destroySampler(self.material_sampler);
+        sg.destroyShader(self.skinned_shader);
         sg.destroyShader(self.shader);
     }
 
@@ -146,16 +151,29 @@ pub const VelocityPass = struct {
     /// Record one submesh's motion. Only worth calling for objects whose
     /// transform actually changed.
     pub fn draw(self: *VelocityPass, mesh: Mesh, model: Matrix, prev_model: Matrix, material: Material) void {
+        self.drawInternal(mesh, model, prev_model, material, null);
+    }
+
+    /// Bone motion needs both palette generations in addition to the current and
+    /// previous mesh-node transforms. This is the piece that prevents TAA from
+    /// reprojecting a limb from where only the object root used to be.
+    pub fn drawSkinned(self: *VelocityPass, mesh: Mesh, model: Matrix, prev_model: Matrix, material: Material, skin: skeletal.Binding) void {
+        self.drawInternal(mesh, model, prev_model, material, skin);
+    }
+
+    fn drawInternal(self: *VelocityPass, mesh: Mesh, model: Matrix, prev_model: Matrix, material: Material, skin: ?skeletal.Binding) void {
         std.debug.assert(self.active);
         // Blended geometry does not contribute to opaque depth, so annotating
         // the opaque-depth velocity target with it would overwrite motion for
         // a different surface. It remains an independent transparent-TAA
         // problem; alpha MASK does contribute and is handled below.
         if (material.alpha_mode == .blend) return;
+        if (mesh.isSkinned() and skin == null) return;
+        if (!mesh.isSkinned() and skin != null) return;
 
         const key = PipelineKey{
-            .shader = self.shader,
-            .layout = .mesh,
+            .shader = if (skin != null) self.skinned_shader else self.shader,
+            .layout = if (skin != null) .mesh_skinned else .mesh,
             .index_type = mesh.index_type,
             .indexed = true,
             .pass = self.sig,
@@ -192,6 +210,11 @@ pub const VelocityPass = struct {
         var bindings = sg.Bindings{};
         bindings.vertex_buffers[0] = mesh.vbuf;
         bindings.index_buffer = mesh.ibuf;
+        if (skin) |binding| {
+            bindings.views[skeletal.palette_view_slot] = binding.palette;
+            bindings.views[skeletal.previous_palette_view_slot] = binding.previous_palette;
+            bindings.samplers[skeletal.palette_sampler_slot] = binding.sampler;
+        }
         bindings.views[shd.VIEW_base_color_map] = material.map(.base_color).view;
         bindings.samplers[shd.SMP_smp_material] = material.sampler orelse self.material_sampler;
 

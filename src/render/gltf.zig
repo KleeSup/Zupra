@@ -30,6 +30,7 @@ const texmod = @import("../graphics/texture.zig");
 const model_mod = @import("model.zig");
 const material_mod = @import("material.zig");
 const mesh_mod = @import("mesh.zig");
+const skeletal = @import("skeletal.zig");
 const light_mod = @import("light.zig");
 const cameramod = @import("camera3d.zig");
 const mathz = @import("../math.zig");
@@ -37,6 +38,7 @@ const zm = mathz.zm;
 const sg = @import("sokol").gfx;
 
 const Vertex3D = graphics.Vertex3D;
+const VertexSkinned3D = graphics.VertexSkinned3D;
 const Texture = texmod.Texture;
 const Model = model_mod.Model;
 const Material = material_mod.Material;
@@ -149,7 +151,14 @@ pub fn loadSceneMemory(allocator: std.mem.Allocator, bytes: []const u8) !Scene {
 //  Build
 // ===========================================================================
 
-const TexCache = std.AutoHashMapUnmanaged(*c.Image, Texture);
+/// glTF permits the same encoded image to serve both a colour role and a data
+/// role. Those need distinct GPU images because sRGB decode belongs to the
+/// image format, not the sampler or material binding.
+const TexCacheKey = struct {
+    image: *c.Image,
+    color_space: texmod.ColorSpace,
+};
+const TexCache = std.AutoHashMapUnmanaged(TexCacheKey, Texture);
 
 /// Sampler cache key: sokol samplers are a limited pool, so dedup identical
 /// wrap/filter combinations across all textures in the model.
@@ -181,6 +190,16 @@ const Builder = struct {
     cameras: std.ArrayListUnmanaged(SceneCamera) = .empty,
     lights: std.ArrayListUnmanaged(Light) = .empty,
 
+    // Raw glTF skeletal data survives after cgltf is freed. Pointer maps are
+    // loader-only conveniences; all runtime references are compact indices.
+    node_indices: std.AutoHashMapUnmanaged(*c.Node, u32) = .{},
+    skin_indices: std.AutoHashMapUnmanaged(*c.Skin, u32) = .{},
+    nodes: std.ArrayListUnmanaged(skeletal.Node) = .empty,
+    skins: std.ArrayListUnmanaged(skeletal.Skin) = .empty,
+    skin_instances: std.ArrayListUnmanaged(skeletal.SkinInstance) = .empty,
+    clips: std.ArrayListUnmanaged(skeletal.Clip) = .empty,
+    has_skeletal: bool = false,
+
     fn deinit(self: *Builder) void {
         // On a failed load, all already-uploaded GPU resources must go away;
         // ArrayList backing storage alone is not enough for Mesh/Texture.
@@ -190,6 +209,15 @@ const Builder = struct {
         self.mapping.deinit(self.allocator);
         self.cameras.deinit(self.allocator);
         self.lights.deinit(self.allocator);
+
+        self.node_indices.deinit(self.allocator);
+        self.skin_indices.deinit(self.allocator);
+        self.nodes.deinit(self.allocator);
+        for (self.skins.items) |*skin| skin.deinit(self.allocator);
+        self.skins.deinit(self.allocator);
+        self.skin_instances.deinit(self.allocator);
+        for (self.clips.items) |*clip| clip.deinit(self.allocator);
+        self.clips.deinit(self.allocator);
 
         for (self.owned_textures.items) |texture| texture.deinit();
         self.owned_textures.deinit(self.allocator);
@@ -217,11 +245,200 @@ const Builder = struct {
         }
         return try self.owned_samplers.toOwnedSlice(self.allocator);
     }
+
+    fn takeSkeletal(self: *Builder) !?skeletal.Asset {
+        if (!self.has_skeletal) return null;
+
+        const nodes = try self.nodes.toOwnedSlice(self.allocator);
+        errdefer self.allocator.free(nodes);
+        const skins = try self.skins.toOwnedSlice(self.allocator);
+        errdefer {
+            for (skins) |*skin| skin.deinit(self.allocator);
+            self.allocator.free(skins);
+        }
+        const skin_instances = try self.skin_instances.toOwnedSlice(self.allocator);
+        errdefer self.allocator.free(skin_instances);
+        const clips = try self.clips.toOwnedSlice(self.allocator);
+        errdefer {
+            for (clips) |*clip| clip.deinit(self.allocator);
+            self.allocator.free(clips);
+        }
+
+        self.node_indices.deinit(self.allocator);
+        self.node_indices = .{};
+        self.skin_indices.deinit(self.allocator);
+        self.skin_indices = .{};
+        return .{
+            .allocator = self.allocator,
+            .nodes = nodes,
+            .skins = skins,
+            .skin_instances = skin_instances,
+            .clips = clips,
+            .asset_to_engine = self.flip,
+        };
+    }
 };
+
+/// Copy the subset of glTF hierarchy data that has to outlive cgltf. Static
+/// primitives intentionally do not pay for this; only assets containing a Skin
+/// retain node records and animation clips.
+fn buildSkeletalData(b: *Builder, data: *c.Data) !void {
+    if (data.skins_count == 0) return;
+    const raw_nodes = data.nodes orelse return error.InvalidSkinData;
+    const raw_skins = data.skins orelse return error.InvalidSkinData;
+
+    b.has_skeletal = true;
+    try b.node_indices.ensureTotalCapacity(b.allocator, @intCast(data.nodes_count));
+    try b.nodes.ensureTotalCapacity(b.allocator, data.nodes_count);
+    for (raw_nodes[0..data.nodes_count], 0..) |*node, i| {
+        try b.node_indices.put(b.allocator, node, @intCast(i));
+        const translation: [3]f32 = if (node.has_translation != 0) node.translation else .{ 0, 0, 0 };
+        const rotation: [4]f32 = if (node.has_rotation != 0) node.rotation else .{ 0, 0, 0, 1 };
+        const scale: [3]f32 = if (node.has_scale != 0) node.scale else .{ 1, 1, 1 };
+        try b.nodes.append(b.allocator, .{
+            .parent = null,
+            .rest = .{ .translation = translation, .rotation = rotation, .scale = scale },
+            .rest_matrix = zm.matFromArr(node.transformLocal()),
+            .uses_trs = node.has_matrix == 0,
+        });
+    }
+    for (raw_nodes[0..data.nodes_count], 0..) |*node, i| {
+        if (node.parent) |parent| {
+            b.nodes.items[i].parent = b.node_indices.get(parent) orelse return error.InvalidSkeletalNode;
+        }
+    }
+
+    try b.skin_indices.ensureTotalCapacity(b.allocator, @intCast(data.skins_count));
+    for (raw_skins[0..data.skins_count], 0..) |*raw_skin, skin_index| {
+        try b.skin_indices.put(b.allocator, raw_skin, @intCast(skin_index));
+        try appendSkeletalSkin(b, raw_skin);
+    }
+
+    if (data.animations) |raw_animations| {
+        for (raw_animations[0..data.animations_count]) |*animation| {
+            var channels: std.ArrayListUnmanaged(skeletal.Channel) = .empty;
+            errdefer {
+                for (channels.items) |*channel| channel.deinit(b.allocator);
+                channels.deinit(b.allocator);
+            }
+            var duration: f32 = 0;
+
+            for (animation.channels[0..animation.channels_count]) |*raw_channel| {
+                const path = animationPath(raw_channel.target_path) orelse continue;
+                const target_node = raw_channel.target_node orelse continue;
+                const node_index = b.node_indices.get(target_node) orelse return error.InvalidAnimationNode;
+                const channel = try decodeAnimationChannel(b.allocator, raw_channel, node_index, path);
+                if (channel.times.len > 0) duration = @max(duration, channel.times[channel.times.len - 1]);
+                try channels.append(b.allocator, channel);
+            }
+
+            const owned_channels = try channels.toOwnedSlice(b.allocator);
+            var transferred = false;
+            errdefer if (!transferred) {
+                for (owned_channels) |*channel| channel.deinit(b.allocator);
+                b.allocator.free(owned_channels);
+            };
+            try b.clips.append(b.allocator, .{
+                // Names are optional metadata; clip indices are stable even for
+                // anonymous glTF clips and avoid retaining cgltf string memory.
+                .name = null,
+                .channels = owned_channels,
+                .duration = duration,
+            });
+            transferred = true;
+        }
+    }
+}
+
+fn appendSkeletalSkin(b: *Builder, raw_skin: *c.Skin) !void {
+    if (raw_skin.joints_count > std.math.maxInt(u16)) return error.SkinTooManyJoints;
+    const joints = try b.allocator.alloc(u32, raw_skin.joints_count);
+    errdefer b.allocator.free(joints);
+    const inverse_bind = try b.allocator.alloc(Matrix, raw_skin.joints_count);
+    errdefer b.allocator.free(inverse_bind);
+
+    for (raw_skin.joints[0..raw_skin.joints_count], 0..) |joint, i| {
+        joints[i] = b.node_indices.get(joint) orelse return error.InvalidSkinJoint;
+        if (raw_skin.inverse_bind_matrices) |accessor| {
+            if (accessor.type != .mat4 or accessor.count < raw_skin.joints_count) return error.InvalidInverseBindMatrices;
+            var values: [16]f32 = undefined;
+            if (!accessor.readFloat(i, &values)) return error.InvalidInverseBindMatrices;
+            inverse_bind[i] = zm.matFromArr(values);
+        } else {
+            inverse_bind[i] = zm.identity();
+        }
+    }
+
+    // No fallible operation follows this append, so ownership cleanly transfers
+    // at the end of this helper's scope without any deferred-cleanup overlap.
+    try b.skins.append(b.allocator, .{
+        .joints = joints,
+        .inverse_bind = inverse_bind,
+        .skeleton_root = if (raw_skin.skeleton) |root| b.node_indices.get(root) orelse return error.InvalidSkinRoot else null,
+    });
+}
+
+fn animationPath(path: c.AnimationPathType) ?skeletal.Path {
+    return switch (path) {
+        .translation => .translation,
+        .rotation => .rotation,
+        .scale => .scale,
+        .weights, .invalid => null,
+    };
+}
+
+fn decodeAnimationChannel(allocator: std.mem.Allocator, raw: *c.AnimationChannel, node_index: u32, path: skeletal.Path) !skeletal.Channel {
+    const sampler = raw.sampler;
+    if (sampler.input.type != .scalar or sampler.input.count == 0) return error.InvalidAnimationChannel;
+    const components = path.componentCount();
+    if (sampler.output.type.numComponents() != components) return error.InvalidAnimationChannel;
+    const samples_per_key: usize = if (sampler.interpolation == .cubic_spline) 3 else 1;
+    const expected_samples = sampler.input.count * samples_per_key;
+    if (sampler.output.count != expected_samples) return error.InvalidAnimationChannel;
+
+    const times = try allocator.alloc(f32, sampler.input.count);
+    errdefer allocator.free(times);
+    for (times, 0..) |*time, i| {
+        var value: [1]f32 = undefined;
+        if (!sampler.input.readFloat(i, &value)) return error.InvalidAnimationChannel;
+        time.* = value[0];
+        if (i > 0 and time.* < times[i - 1]) return error.InvalidAnimationChannel;
+    }
+
+    const values = try allocator.alloc(f32, expected_samples * components);
+    errdefer allocator.free(values);
+    var sample: usize = 0;
+    while (sample < expected_samples) : (sample += 1) {
+        if (!sampler.output.readFloat(sample, values[sample * components ..][0..components])) return error.InvalidAnimationChannel;
+    }
+
+    return .{
+        .node = node_index,
+        .path = path,
+        .interpolation = switch (sampler.interpolation) {
+            .linear => .linear,
+            .step => .step,
+            .cubic_spline => .cubic_spline,
+        },
+        .times = times,
+        .values = values,
+    };
+}
+
+fn skinInstanceIndex(b: *Builder, skin_index: u32, node_index: u32) !u32 {
+    for (b.skin_instances.items, 0..) |instance, i| {
+        if (instance.skin_index == skin_index and instance.mesh_node == node_index) return @intCast(i);
+    }
+    const index: u32 = @intCast(b.skin_instances.items.len);
+    try b.skin_instances.append(b.allocator, .{ .skin_index = skin_index, .mesh_node = node_index });
+    return index;
+}
 
 fn buildScene(allocator: std.mem.Allocator, data: *c.Data, base_dir: []const u8) !Scene {
     var b = Builder{ .allocator = allocator, .base_dir = base_dir, .flip = rhToLh() };
     defer b.deinit();
+
+    try buildSkeletalData(&b, data);
 
     // Walk the active scene's node hierarchy. cgltf gives us each node's WORLD
     // transform directly (it composes the parent chain), so no manual recursion
@@ -260,7 +477,11 @@ fn buildScene(allocator: std.mem.Allocator, data: *c.Data, base_dir: []const u8)
     const lights = try b.lights.toOwnedSlice(allocator);
     errdefer allocator.free(lights);
 
-    const model = Model.initWithOwnedResources(allocator, meshes, materials, mapping, owned_textures, owned_samplers);
+    var skeletal_asset = try b.takeSkeletal();
+    errdefer if (skeletal_asset) |*asset| asset.deinit();
+
+    var model = Model.initWithOwnedResources(allocator, meshes, materials, mapping, owned_textures, owned_samplers);
+    model.skeletal_asset = skeletal_asset;
     return Scene{
         .model = model,
         .cameras = cameras,
@@ -275,8 +496,18 @@ fn visitNode(b: *Builder, node: *c.Node) !void {
     const world = zm.mul(world_gltf, b.flip); // engine-space node transform
 
     if (node.mesh) |mesh| {
-        for (mesh.primitives[0..mesh.primitives_count]) |*prim| {
-            try emitPrimitive(b, prim, world);
+        if (node.skin) |raw_skin| {
+            const node_index = b.node_indices.get(node) orelse return error.InvalidSkinnedNode;
+            const skin_index = b.skin_indices.get(raw_skin) orelse return error.InvalidSkin;
+            const palette_index = try skinInstanceIndex(b, skin_index, node_index);
+            const joint_count = b.skins.items[skin_index].joints.len;
+            for (mesh.primitives[0..mesh.primitives_count]) |*prim| {
+                try emitSkinnedPrimitive(b, prim, world_gltf, world, palette_index, node_index, joint_count);
+            }
+        } else {
+            for (mesh.primitives[0..mesh.primitives_count]) |*prim| {
+                try emitPrimitive(b, prim, world);
+            }
         }
     }
     if (node.camera) |cam| try emitCamera(b, cam, world);
@@ -362,13 +593,13 @@ fn appendMesh(b: *Builder, prim: *c.Primitive, verts: []Vertex3D, vcount: usize,
             const inds = try b.allocator.alloc(u16, icount);
             defer b.allocator.free(inds);
             readIndices(u16, indices, inds, flip_winding);
-            if (compute_tan) computeTangents(verts, u16, inds);
+            if (compute_tan) computeTangents(Vertex3D, verts, u16, inds);
             try pushPrim(b, prim, verts, .{ .u16 = inds });
         } else {
             const inds = try b.allocator.alloc(u32, icount);
             defer b.allocator.free(inds);
             readIndices(u32, indices, inds, flip_winding);
-            if (compute_tan) computeTangents(verts, u32, inds);
+            if (compute_tan) computeTangents(Vertex3D, verts, u32, inds);
             try pushPrim(b, prim, verts, .{ .u32 = inds });
         }
     } else {
@@ -379,13 +610,13 @@ fn appendMesh(b: *Builder, prim: *c.Primitive, verts: []Vertex3D, vcount: usize,
             const inds = try b.allocator.alloc(u16, icount);
             defer b.allocator.free(inds);
             fillSequentialIndices(u16, inds, flip_winding);
-            if (compute_tan) computeTangents(verts, u16, inds);
+            if (compute_tan) computeTangents(Vertex3D, verts, u16, inds);
             try pushPrim(b, prim, verts, .{ .u16 = inds });
         } else {
             const inds = try b.allocator.alloc(u32, icount);
             defer b.allocator.free(inds);
             fillSequentialIndices(u32, inds, flip_winding);
-            if (compute_tan) computeTangents(verts, u32, inds);
+            if (compute_tan) computeTangents(Vertex3D, verts, u32, inds);
             try pushPrim(b, prim, verts, .{ .u32 = inds });
         }
     }
@@ -393,6 +624,182 @@ fn appendMesh(b: *Builder, prim: *c.Primitive, verts: []Vertex3D, vcount: usize,
 
 fn pushPrim(b: *Builder, prim: *c.Primitive, verts: []Vertex3D, idx: graphics.IndexData) !void {
     const mesh = Mesh.init(verts, idx);
+    var mesh_transferred = false;
+    errdefer if (!mesh_transferred) mesh.deinit();
+    const mat = try buildMaterial(b, prim);
+    const slot = b.materials.items.len;
+    try b.meshes.append(b.allocator, mesh);
+    mesh_transferred = true;
+    try b.materials.append(b.allocator, mat);
+    try b.mapping.append(b.allocator, slot);
+}
+
+/// Unlike the static path, skin vertices remain in raw glTF mesh space. The
+/// GPU palette and the per-node draw transform recreate the glTF skinning
+/// equation each frame, which is what lets joints move without re-uploading the
+/// vertex buffer.
+fn emitSkinnedPrimitive(
+    b: *Builder,
+    prim: *c.Primitive,
+    bind_world: Matrix,
+    engine_world: Matrix,
+    palette_index: u32,
+    node_index: u32,
+    joint_count: usize,
+) !void {
+    var pos_acc: ?*c.Accessor = null;
+    var norm_acc: ?*c.Accessor = null;
+    var uv_acc: ?*c.Accessor = null;
+    var uv1_acc: ?*c.Accessor = null;
+    var tang_acc: ?*c.Accessor = null;
+    var joints_acc: ?*c.Accessor = null;
+    var weights_acc: ?*c.Accessor = null;
+    var has_second_joint_set = false;
+    var has_second_weight_set = false;
+    for (prim.attributes[0..prim.attributes_count]) |*attr| {
+        switch (attr.type) {
+            .position => pos_acc = attr.data,
+            .normal => norm_acc = attr.data,
+            .texcoord => switch (attr.index) {
+                0 => uv_acc = attr.data,
+                1 => uv1_acc = attr.data,
+                else => {},
+            },
+            .tangent => tang_acc = attr.data,
+            .joints => {
+                if (attr.index == 0) joints_acc = attr.data else has_second_joint_set = true;
+            },
+            .weights => {
+                if (attr.index == 0) weights_acc = attr.data else has_second_weight_set = true;
+            },
+            else => {},
+        }
+    }
+    const positions = pos_acc orelse return;
+    if (has_second_joint_set or has_second_weight_set) {
+        std.log.warn("glTF skin primitive uses JOINTS_1/WEIGHTS_1; Zupra currently supports four influences per vertex", .{});
+    }
+    const joints = joints_acc orelse {
+        std.log.warn("glTF skin primitive has no JOINTS_0; importing its bind pose as static geometry", .{});
+        return emitPrimitive(b, prim, engine_world);
+    };
+    const weights = weights_acc orelse {
+        std.log.warn("glTF skin primitive has no WEIGHTS_0; importing its bind pose as static geometry", .{});
+        return emitPrimitive(b, prim, engine_world);
+    };
+    if (joint_count == 0 or joints.type != .vec4 or weights.type != .vec4) return error.InvalidSkinAttributes;
+
+    const vcount = positions.count;
+    const det = zm.determinant(engine_world)[0];
+    const tangent_w_sign: f32 = if (det < 0) -1 else 1;
+    const flip_winding = needsIndexFlip(det);
+
+    const verts = try b.allocator.alloc(VertexSkinned3D, vcount);
+    defer b.allocator.free(verts);
+
+    var i: usize = 0;
+    while (i < vcount) : (i += 1) {
+        var p: [3]f32 = .{ 0, 0, 0 };
+        var n: [3]f32 = .{ 0, 1, 0 };
+        var uv: [2]f32 = .{ 0, 0 };
+        var uv1: [2]f32 = .{ 0, 0 };
+        var t: [4]f32 = .{ 1, 0, 0, 1 };
+        var raw_joints: [4]u32 = undefined;
+        var decoded_weights: [4]f32 = undefined;
+        _ = positions.readFloat(i, &p);
+        if (norm_acc) |a| _ = a.readFloat(i, &n);
+        if (uv_acc) |a| _ = a.readFloat(i, &uv);
+        if (uv1_acc) |a| _ = a.readFloat(i, &uv1);
+        if (tang_acc) |a| _ = a.readFloat(i, &t);
+        if (!joints.readUint(i, &raw_joints) or !weights.readFloat(i, &decoded_weights)) return error.InvalidSkinAttributes;
+
+        var packed_joints: [4]u16 = undefined;
+        var weight_sum: f32 = 0;
+        for (raw_joints, 0..) |joint, component| {
+            if (joint >= joint_count or joint > std.math.maxInt(u16)) return error.InvalidJointIndex;
+            packed_joints[component] = @intCast(joint);
+            weight_sum += decoded_weights[component];
+        }
+        if (weight_sum > 1e-6) {
+            for (&decoded_weights) |*weight| weight.* /= weight_sum;
+        } else {
+            packed_joints = .{ 0, 0, 0, 0 };
+            decoded_weights = .{ 1, 0, 0, 0 };
+        }
+
+        verts[i] = .{
+            .pos = p,
+            .normal = n,
+            .uv = uv,
+            .uv1 = uv1,
+            .tangent = t,
+            .joints = packed_joints,
+            .weights = decoded_weights,
+        };
+    }
+
+    try appendSkinnedMesh(b, prim, verts, vcount, tang_acc == null, flip_winding, tangent_w_sign, palette_index, node_index, bind_world);
+}
+
+fn appendSkinnedMesh(
+    b: *Builder,
+    prim: *c.Primitive,
+    verts: []VertexSkinned3D,
+    vcount: usize,
+    compute_tan: bool,
+    flip_winding: bool,
+    tangent_w_sign: f32,
+    palette_index: u32,
+    node_index: u32,
+    bind_world: Matrix,
+) !void {
+    const use_u16 = vcount <= 65536;
+    if (prim.indices) |indices| {
+        const icount = indices.count;
+        if (use_u16) {
+            const inds = try b.allocator.alloc(u16, icount);
+            defer b.allocator.free(inds);
+            readIndices(u16, indices, inds, flip_winding);
+            if (compute_tan) computeTangents(VertexSkinned3D, verts, u16, inds);
+            applyTangentHandedness(VertexSkinned3D, verts, tangent_w_sign);
+            try pushSkinnedPrim(b, prim, verts, .{ .u16 = inds }, palette_index, node_index, bind_world);
+        } else {
+            const inds = try b.allocator.alloc(u32, icount);
+            defer b.allocator.free(inds);
+            readIndices(u32, indices, inds, flip_winding);
+            if (compute_tan) computeTangents(VertexSkinned3D, verts, u32, inds);
+            applyTangentHandedness(VertexSkinned3D, verts, tangent_w_sign);
+            try pushSkinnedPrim(b, prim, verts, .{ .u32 = inds }, palette_index, node_index, bind_world);
+        }
+    } else {
+        if (use_u16) {
+            const inds = try b.allocator.alloc(u16, vcount);
+            defer b.allocator.free(inds);
+            fillSequentialIndices(u16, inds, flip_winding);
+            if (compute_tan) computeTangents(VertexSkinned3D, verts, u16, inds);
+            applyTangentHandedness(VertexSkinned3D, verts, tangent_w_sign);
+            try pushSkinnedPrim(b, prim, verts, .{ .u16 = inds }, palette_index, node_index, bind_world);
+        } else {
+            const inds = try b.allocator.alloc(u32, vcount);
+            defer b.allocator.free(inds);
+            fillSequentialIndices(u32, inds, flip_winding);
+            if (compute_tan) computeTangents(VertexSkinned3D, verts, u32, inds);
+            applyTangentHandedness(VertexSkinned3D, verts, tangent_w_sign);
+            try pushSkinnedPrim(b, prim, verts, .{ .u32 = inds }, palette_index, node_index, bind_world);
+        }
+    }
+}
+
+fn pushSkinnedPrim(
+    b: *Builder,
+    prim: *c.Primitive,
+    verts: []VertexSkinned3D,
+    idx: graphics.IndexData,
+    palette_index: u32,
+    node_index: u32,
+    bind_world: Matrix,
+) !void {
+    const mesh = Mesh.initSkinned(verts, idx, palette_index, node_index, bind_world);
     var mesh_transferred = false;
     errdefer if (!mesh_transferred) mesh.deinit();
     const mat = try buildMaterial(b, prim);
@@ -454,12 +861,12 @@ fn buildMaterial(b: *Builder, prim: *c.Primitive) !Material {
     const es: f32 = if (gm.has_emissive_strength != 0) gm.emissive_strength.emissive_strength else 1.0;
     mat.emissive = .{ .r = gm.emissive_factor[0], .g = gm.emissive_factor[1], .b = gm.emissive_factor[2], .a = 1 };
     mat.emissive_strength = es;
-    mat.emissive_map = try loadTexView(b, gm.emissive_texture);
+    mat.emissive_map = try loadTexView(b, gm.emissive_texture, textureColorSpace(.emissive));
 
-    mat.normal_map = try loadTexView(b, gm.normal_texture);
+    mat.normal_map = try loadTexView(b, gm.normal_texture, textureColorSpace(.normal));
     if (gm.normal_texture.texture != null) mat.normal_scale = gm.normal_texture.scale;
 
-    mat.occlusion_map = try loadTexView(b, gm.occlusion_texture);
+    mat.occlusion_map = try loadTexView(b, gm.occlusion_texture, textureColorSpace(.occlusion));
     // glTF stores occlusion STRENGTH in the occlusion texture's `scale` field
     // (cgltf reuses TextureView.scale for normal-scale and occlusion-strength).
     if (gm.occlusion_texture.texture != null) {
@@ -471,8 +878,8 @@ fn buildMaterial(b: *Builder, prim: *c.Primitive) !Material {
         mat.base_color = .{ .r = pbr.base_color_factor[0], .g = pbr.base_color_factor[1], .b = pbr.base_color_factor[2], .a = pbr.base_color_factor[3] };
         mat.metallic = pbr.metallic_factor;
         mat.roughness = pbr.roughness_factor;
-        mat.base_color_map = try loadTexView(b, pbr.base_color_texture);
-        mat.metallic_roughness_map = try loadTexView(b, pbr.metallic_roughness_texture);
+        mat.base_color_map = try loadTexView(b, pbr.base_color_texture, textureColorSpace(.base_color));
+        mat.metallic_roughness_map = try loadTexView(b, pbr.metallic_roughness_texture, textureColorSpace(.metallic_roughness));
 
         setMapUv(&mat, @intFromEnum(MapSlot.base_color), pbr.base_color_texture);
         setMapUv(&mat, @intFromEnum(MapSlot.metallic_roughness), pbr.metallic_roughness_texture);
@@ -489,6 +896,24 @@ fn buildMaterial(b: *Builder, prim: *c.Primitive) !Material {
     mat.sampler = resolveSamplerImpl(b, gm) catch null;
 
     return mat;
+}
+
+/// glTF 2.0 defines base-colour and emissive images as sRGB. Every other core
+/// PBR map carries encoded physical parameters, so decoding its RGB channels
+/// would corrupt normals, roughness, metallic and occlusion values.
+fn textureColorSpace(slot: MapSlot) texmod.ColorSpace {
+    return switch (slot) {
+        .base_color, .emissive => .srgb,
+        .normal, .metallic_roughness, .occlusion => .linear,
+    };
+}
+
+test "glTF core material slots use the correct colour spaces" {
+    try std.testing.expectEqual(texmod.ColorSpace.srgb, textureColorSpace(.base_color));
+    try std.testing.expectEqual(texmod.ColorSpace.srgb, textureColorSpace(.emissive));
+    try std.testing.expectEqual(texmod.ColorSpace.linear, textureColorSpace(.normal));
+    try std.testing.expectEqual(texmod.ColorSpace.linear, textureColorSpace(.metallic_roughness));
+    try std.testing.expectEqual(texmod.ColorSpace.linear, textureColorSpace(.occlusion));
 }
 
 /// Record a map's UV set (bit in uv_set) and its KHR_texture_transform, with
@@ -624,16 +1049,17 @@ fn magFilter(f: c.FilterType) sg.Filter {
     };
 }
 
-fn loadTexView(b: *Builder, view: c.TextureView) !?Texture {
+fn loadTexView(b: *Builder, view: c.TextureView, color_space: texmod.ColorSpace) !?Texture {
     const texture = view.texture orelse return null;
     const image = texture.image orelse return null;
-    if (b.cache.get(image)) |t| return t;
+    const key = TexCacheKey{ .image = image, .color_space = color_space };
+    if (b.cache.get(key)) |t| return t;
 
     const loaded: ?Texture = blk: {
         if (image.buffer_view) |bv| {
             if (bv.buffer.data) |ptr| {
                 const raw: [*]const u8 = @ptrCast(ptr);
-                break :blk Texture.initBufferMipmapped(raw[bv.offset .. bv.offset + bv.size]) catch null;
+                break :blk Texture.initBufferMipmappedWithColorSpace(raw[bv.offset .. bv.offset + bv.size], color_space) catch null;
             }
         }
         if (image.uri) |uri_c| {
@@ -643,7 +1069,7 @@ fn loadTexView(b: *Builder, view: c.TextureView) !?Texture {
                 defer b.allocator.free(full);
                 const bytes = readWholeFile(b.allocator, full) catch break :blk null;
                 defer b.allocator.free(bytes);
-                break :blk Texture.initBufferMipmapped(bytes) catch null;
+                break :blk Texture.initBufferMipmappedWithColorSpace(bytes, color_space) catch null;
             }
         }
         break :blk null;
@@ -653,7 +1079,7 @@ fn loadTexView(b: *Builder, view: c.TextureView) !?Texture {
             t.deinit();
             return err;
         };
-        b.cache.put(b.allocator, image, t) catch |err| {
+        b.cache.put(b.allocator, key, t) catch |err| {
             const owned = b.owned_textures.pop().?;
             owned.deinit();
             return err;
@@ -711,7 +1137,7 @@ fn emitLight(b: *Builder, light: *c.Light, world: Matrix) !void {
 //  Tangent fallback (Lengyel), for primitives without TANGENT.
 // ---------------------------------------------------------------------------
 
-fn computeTangents(verts: []Vertex3D, comptime I: type, indices: []const I) void {
+fn computeTangents(comptime V: type, verts: []V, comptime I: type, indices: []const I) void {
     const A = std.heap.page_allocator;
     const tan = A.alloc([3]f32, verts.len) catch return;
     defer A.free(tan);
@@ -761,4 +1187,9 @@ fn computeTangents(verts: []Vertex3D, comptime I: type, indices: []const I) void
         const w: f32 = if (cx * bit[vi][0] + cy * bit[vi][1] + cz * bit[vi][2] < 0) -1 else 1;
         v.tangent = .{ t[0], t[1], t[2], w };
     }
+}
+
+fn applyTangentHandedness(comptime V: type, verts: []V, sign: f32) void {
+    if (sign >= 0) return;
+    for (verts) |*vertex| vertex.tangent[3] = -vertex.tangent[3];
 }

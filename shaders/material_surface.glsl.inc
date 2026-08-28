@@ -33,7 +33,8 @@ layout(binding=0) uniform sampler smp_material;
 
 /// Everything the standard material provides at one UV. Call it even if you only
 /// want one field, the compiler will fold away what you don't use, but the bindings
-/// stay declared, which is the point.
+/// stay declared, which is the point. glTF base-colour and emissive maps arrive
+/// in linear light because their textures use hardware sRGB decoding.
 struct SurfaceSample {
     vec4 base_color;
     vec3 normal_ts;   // tangent-space, already unpacked from [0,1] to [-1,1]

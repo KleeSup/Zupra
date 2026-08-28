@@ -29,6 +29,22 @@ pub const Vertex3D = extern struct {
     uv1: [2]f32 = .{ 0, 0 }, // glTF TEXCOORD_1 (baked AO, lightmaps, detail)
 };
 
+/// glTF skinned mesh vertex. Kept separate from `Vertex3D` so static geometry
+/// does not pay for joint data in GPU bandwidth or storage.
+///
+/// `joints` are indices into the skin palette attached to the draw, not global
+/// node IDs. Four 16-bit indices cover the glTF core JOINTS_0 accessor range;
+/// weights are decoded to floats by the loader and normalized before upload.
+pub const VertexSkinned3D = extern struct {
+    pos: [3]f32,
+    normal: [3]f32,
+    uv: [2]f32,
+    tangent: [4]f32 = .{ 1, 0, 0, 1 },
+    uv1: [2]f32 = .{ 0, 0 },
+    joints: [4]u16 = .{ 0, 0, 0, 0 },
+    weights: [4]f32 = .{ 1, 0, 0, 0 },
+};
+
 /// Debug-draw vertex (lines / wire shapes), 2D and 3D.
 pub const VertexDebug = extern struct {
     pos: [3]f32,

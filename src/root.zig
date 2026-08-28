@@ -149,7 +149,7 @@ pub const PoolSetup = struct {
     image_pool_size: i32 = 2048,
     sampler_pool_size: i32 = 256,
     pipeline_pool_size: i32 = 1024,
-    shader_pool_size: i32 = 0,
+    shader_pool_size: i32 = 128,
     view_pool_size: i32 = 0,
     uniform_buffer_size: i32 = 0,
 };

@@ -36,6 +36,8 @@ const mesh_mod = @import("mesh.zig");
 const Camera3D = @import("camera3d.zig").Camera3D;
 
 const shd_prepass = @import("shaders").depth_prepass;
+const shd_prepass_skinned = @import("shaders").depth_prepass_skinned;
+const skeletal = @import("skeletal.zig");
 
 const Matrix = math.Matrix;
 const Mesh = mesh_mod.Mesh;
@@ -52,6 +54,7 @@ pub const DepthPrepass = struct {
     /// transform bit for bit or the shading pass z-fights against its own
     /// depth. See the header comment in depth_prepass.glsl.
     shader: sg.Shader,
+    skinned_shader: sg.Shader,
     material_sampler: sg.Sampler,
 
     view_proj: Matrix = undefined,
@@ -60,6 +63,7 @@ pub const DepthPrepass = struct {
 
     pub fn init(cache: *PipelineCache) DepthPrepass {
         const shader = sg.makeShader(shd_prepass.depthPrepassShaderDesc(sg.queryBackend()));
+        const skinned_shader = sg.makeShader(shd_prepass_skinned.depthPrepassSkinnedShaderDesc(sg.queryBackend()));
         const state = sg.queryShaderState(shader);
         if (state != .VALID) {
             std.log.err(
@@ -70,6 +74,7 @@ pub const DepthPrepass = struct {
         return .{
             .cache = cache,
             .shader = shader,
+            .skinned_shader = skinned_shader,
             .material_sampler = sg.makeSampler(.{
                 .min_filter = .LINEAR,
                 .mag_filter = .LINEAR,
@@ -82,6 +87,7 @@ pub const DepthPrepass = struct {
 
     pub fn deinit(self: *DepthPrepass) void {
         sg.destroySampler(self.material_sampler);
+        sg.destroyShader(self.skinned_shader);
         sg.destroyShader(self.shader);
     }
 
@@ -103,16 +109,26 @@ pub const DepthPrepass = struct {
     /// Lay down depth for one submesh. Silently skips anything the shading pass
     /// will write depth for itself.
     pub fn draw(self: *DepthPrepass, mesh: Mesh, model: Matrix, material: Material) void {
+        self.drawInternal(mesh, model, material, null);
+    }
+
+    pub fn drawSkinned(self: *DepthPrepass, mesh: Mesh, model: Matrix, material: Material, skin: skeletal.Binding) void {
+        self.drawInternal(mesh, model, material, skin);
+    }
+
+    fn drawInternal(self: *DepthPrepass, mesh: Mesh, model: Matrix, material: Material, skin: ?skeletal.Binding) void {
         std.debug.assert(self.active);
         if (!mesh_mod.depthPrepassEligible(material)) return;
+        if (mesh.isSkinned() and skin == null) return;
+        if (!mesh.isSkinned() and skin != null) return;
 
         // Cull mode and winding must match the shading pass draw for this same
         // mesh. If they diverge the two passes rasterise different triangles,
         // and the depth recorded here stops corresponding to what gets shaded —
         // surfaces drop out or z-fight depending on which way the mismatch runs.
         const key = PipelineKey{
-            .shader = self.shader,
-            .layout = .mesh,
+            .shader = if (skin != null) self.skinned_shader else self.shader,
+            .layout = if (skin != null) .mesh_skinned else .mesh,
             .index_type = mesh.index_type,
             .indexed = true,
             .pass = self.pass,
@@ -150,6 +166,10 @@ pub const DepthPrepass = struct {
         var bindings = sg.Bindings{};
         bindings.vertex_buffers[0] = mesh.vbuf;
         bindings.index_buffer = mesh.ibuf;
+        if (skin) |binding| {
+            bindings.views[skeletal.palette_view_slot] = binding.palette;
+            bindings.samplers[skeletal.palette_sampler_slot] = binding.sampler;
+        }
         bindings.views[shd_prepass.VIEW_base_color_map] = material.map(.base_color).view;
         bindings.samplers[shd_prepass.SMP_smp_material] = material.sampler orelse self.material_sampler;
 

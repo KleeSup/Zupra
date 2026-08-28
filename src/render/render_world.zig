@@ -33,6 +33,7 @@ const std = @import("std");
 const math = @import("../math.zig");
 const culling = @import("culling.zig");
 const model_mod = @import("model.zig");
+const skeletal = @import("skeletal.zig");
 const SceneRenderer = @import("scene.zig").SceneRenderer;
 
 const Matrix = math.Matrix;
@@ -100,6 +101,10 @@ pub const Object = struct {
     position: Vec3 = .{ .x = 0, .y = 0, .z = 0 },
     rotation: Quaternion = .{ 0, 0, 0, 1 },
     scale: Vec3 = .{ .x = 1, .y = 1, .z = 1 },
+    /// Optional independent pose for a glTF-skinned model. Update it before
+    /// submit(); SceneRenderer then carries bone velocity and invalidates shadow
+    /// cache reuse automatically.
+    animator: ?*skeletal.Animator = null,
 
     mobility: Mobility = .dynamic,
     visible: bool = true,
@@ -379,6 +384,7 @@ pub const RenderWorld = struct {
             inst.position = obj.position;
             inst.rotation = obj.rotation;
             inst.scale = obj.scale;
+            inst.animator = obj.animator;
             inst.cast_shadows = obj.cast_shadows;
             // An idle .dynamic object must never enter a cached shadow tile:
             // it may begin moving after the cache decision but before any

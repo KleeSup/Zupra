@@ -6,6 +6,7 @@ const zupra = @import("../root.zig");
 const graphics = @import("graphics.zig");
 const Vertex2D = graphics.Vertex2D;
 const Vertex3D = graphics.Vertex3D;
+const VertexSkinned3D = graphics.VertexSkinned3D;
 const VertexDebug = graphics.VertexDebug;
 const IndexType = graphics.IndexType;
 
@@ -15,6 +16,11 @@ pub const VertexLayout = enum {
     sprite, // Vertex2D
     mesh, // Vertex3D with pos, normal, uv and tangent
     mesh_unlit, // Vertex3D buffer with only pos, normal and uv for unlit scenes.
+    /// VertexSkinned3D. The additional joints/weights are used by GPU skinning
+    /// variants and deliberately live in a distinct stream layout so static
+    /// meshes keep their smaller Vertex3D stride.
+    mesh_skinned,
+    mesh_skinned_unlit,
     debug, // VertexDebug
     fullscreen, // Vertex2D buffer, only pos+uv consumed (screen-space passes)
     mesh_instanced,
@@ -43,6 +49,24 @@ pub const VertexLayout = enum {
                 l.attrs[0] = .{ .offset = @offsetOf(Vertex3D, "pos"), .format = .FLOAT3 };
                 l.attrs[1] = .{ .offset = @offsetOf(Vertex3D, "uv"), .format = .FLOAT2 };
                 l.attrs[2] = .{ .offset = @offsetOf(Vertex3D, "uv1"), .format = .FLOAT2 };
+            },
+            .mesh_skinned => {
+                l.buffers[0].stride = @sizeOf(VertexSkinned3D);
+                l.attrs[0] = .{ .offset = @offsetOf(VertexSkinned3D, "pos"), .format = .FLOAT3 };
+                l.attrs[1] = .{ .offset = @offsetOf(VertexSkinned3D, "normal"), .format = .FLOAT3 };
+                l.attrs[2] = .{ .offset = @offsetOf(VertexSkinned3D, "uv"), .format = .FLOAT2 };
+                l.attrs[3] = .{ .offset = @offsetOf(VertexSkinned3D, "tangent"), .format = .FLOAT4 };
+                l.attrs[4] = .{ .offset = @offsetOf(VertexSkinned3D, "uv1"), .format = .FLOAT2 };
+                l.attrs[5] = .{ .offset = @offsetOf(VertexSkinned3D, "joints"), .format = .USHORT4 };
+                l.attrs[6] = .{ .offset = @offsetOf(VertexSkinned3D, "weights"), .format = .FLOAT4 };
+            },
+            .mesh_skinned_unlit => {
+                l.buffers[0].stride = @sizeOf(VertexSkinned3D);
+                l.attrs[0] = .{ .offset = @offsetOf(VertexSkinned3D, "pos"), .format = .FLOAT3 };
+                l.attrs[1] = .{ .offset = @offsetOf(VertexSkinned3D, "uv"), .format = .FLOAT2 };
+                l.attrs[2] = .{ .offset = @offsetOf(VertexSkinned3D, "uv1"), .format = .FLOAT2 };
+                l.attrs[3] = .{ .offset = @offsetOf(VertexSkinned3D, "joints"), .format = .USHORT4 };
+                l.attrs[4] = .{ .offset = @offsetOf(VertexSkinned3D, "weights"), .format = .FLOAT4 };
             },
             .debug => {
                 l.buffers[0].stride = @sizeOf(VertexDebug);

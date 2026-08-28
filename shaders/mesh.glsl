@@ -161,7 +161,9 @@ void main() {
     N = orientTwoSidedNormal(N);
     vec3 V = normalize(camera_pos.xyz - v_world_pos);
 
-    vec3 albedo = base_color.rgb * pow(max(base_sample.rgb, vec3(0.0)), vec3(2.2));
+    // glTF base-colour images are uploaded as SRGB8A8, so texture sampling has
+    // already converted RGB to linear light. Alpha deliberately stays raw.
+    vec3 albedo = base_color.rgb * base_sample.rgb;
 
     vec3 mr = texture(sampler2D(metallic_roughness_map, smp_material), uv_mr).rgb;
     float metallic = material.x * mr.b;

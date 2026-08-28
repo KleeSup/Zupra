@@ -22,6 +22,7 @@ const zm = math.zm;
 const mesh_mod = @import("mesh.zig");
 const Camera3D = @import("camera3d.zig").Camera3D;
 const pipeline = @import("../graphics/pipeline.zig");
+const skeletal = @import("skeletal.zig");
 
 const Mesh = mesh_mod.Mesh;
 const Material = @import("material.zig").Material;
@@ -49,6 +50,11 @@ pub const Model = struct {
     /// put them here, and Model.deinit destroys each handle exactly once.
     owned_textures: ?[]Texture = null,
     owned_samplers: ?[]sg.Sampler = null,
+
+    /// Retained glTF node, skin and clip data. Kept separate from static mesh
+    /// buffers so ordinary procedural/static models retain their existing tiny
+    /// representation and lifetime.
+    skeletal_asset: ?skeletal.Asset = null,
 
     /// Convenience: a one-submesh, one-material model that takes ownership of
     /// `mesh`. Frees its small backing arrays on deinit.
@@ -122,11 +128,23 @@ pub const Model = struct {
             self.allocator.free(samplers);
             self.owned_samplers = null;
         }
+        if (self.skeletal_asset) |*asset| {
+            asset.deinit();
+            self.skeletal_asset = null;
+        }
     }
 
     /// Create a placed instance of this model (identity transform).
     pub fn instance(self: *const Model) ModelInstance {
         return ModelInstance.init(self);
+    }
+
+    /// Create independent mutable animation state for one ModelInstance. The
+    /// resulting Animator owns its palette textures and must outlive every
+    /// instance that references it, then be deinitialized by the caller.
+    pub fn createAnimator(self: *const Model, allocator: std.mem.Allocator) !skeletal.Animator {
+        const asset = if (self.skeletal_asset) |*value| value else return error.ModelHasNoSkeleton;
+        return skeletal.Animator.init(allocator, asset);
     }
 };
 
@@ -135,6 +153,11 @@ pub const ModelInstance = struct {
     position: Vec3 = .{ .x = 0, .y = 0, .z = 0 },
     rotation: Quaternion = .{ 0, 0, 0, 1 }, // identity quaternion
     scale: Vec3 = .{ .x = 1, .y = 1, .z = 1 },
+
+    /// Optional mutable pose state for a glTF-skinned Model. It is intentionally
+    /// external: one immutable Model can be instanced by many independently
+    /// animated characters without duplicating mesh buffers or clip data.
+    animator: ?*skeletal.Animator = null,
 
     /// Whether this instance is submitted to the shadow passes.
     ///
@@ -183,6 +206,10 @@ pub const ModelInstance = struct {
         self.cast_shadows = enabled;
     }
 
+    pub fn setAnimator(self: *ModelInstance, animator: ?*skeletal.Animator) void {
+        self.animator = animator;
+    }
+
     /// Object -> world. Scale, then rotate, then translate (row-vector order:
     /// leftmost applied first). Uploaded directly per the no-transpose rule.
     pub fn modelMatrix(self: ModelInstance) Matrix {
@@ -190,6 +217,38 @@ pub const ModelInstance = struct {
         const r = zm.matFromQuat(self.rotation);
         const t = zm.translation(self.position.x, self.position.y, self.position.z);
         return zm.mul(zm.mul(s, r), t);
+    }
+
+    /// The per-submesh model transform. Static meshes retain the original
+    /// external instance matrix. Skinned glTF primitives need their mesh-node
+    /// world transform as well: the palette removes that transform internally
+    /// (per the glTF skinning equation), so it must be restored here.
+    pub fn meshModelMatrix(self: ModelInstance, mesh: Mesh, previous_pose: bool) Matrix {
+        return self.meshModelMatrixWithInstance(mesh, self.modelMatrix(), previous_pose);
+    }
+
+    /// Variant for temporal submission paths that already retain the prior
+    /// external instance transform. The skeletal pose selection remains
+    /// independent, so a moving character gets both root and bone velocity.
+    pub fn meshModelMatrixWithInstance(self: ModelInstance, mesh: Mesh, instance: Matrix, previous_pose: bool) Matrix {
+        if (!mesh.isSkinned()) return instance;
+
+        const asset = self.model.skeletal_asset orelse return instance;
+        const node_world = if (self.animator) |animator|
+            animator.nodeWorld(mesh.skin_node_index.?, previous_pose) orelse mesh.skin_bind_world
+        else
+            mesh.skin_bind_world;
+        return zm.mul(zm.mul(node_world, asset.asset_to_engine), instance);
+    }
+
+    /// Returns the current/previous GPU palette required by a skinned draw.
+    /// A skinned primitive without an attached Animator is deliberately not
+    /// rendered by the high-level paths rather than being interpreted as a
+    /// static Vertex3D buffer with an incompatible stride.
+    pub fn skinning(self: ModelInstance, mesh: Mesh) ?skeletal.Binding {
+        if (!mesh.isSkinned()) return null;
+        const animator = self.animator orelse return null;
+        return animator.binding(mesh.skin_palette_index.?);
     }
 };
 
@@ -218,11 +277,15 @@ pub const ModelBatch = struct {
     /// Draw every submesh of the instance's model with its mapped material,
     /// all under the instance's transform.
     pub fn draw(self: *ModelBatch, inst: ModelInstance) void {
-        const model_matrix = inst.modelMatrix();
         const model = inst.model;
         for (model.meshes, 0..) |submesh, i| {
             const material = model.materials[model.mesh_material[i]];
-            self.renderer.draw(submesh, model_matrix, material);
+            const matrix = inst.meshModelMatrix(submesh, false);
+            if (inst.skinning(submesh)) |skin| {
+                self.renderer.drawSkinned(submesh, matrix, material, skin);
+            } else {
+                self.renderer.draw(submesh, matrix, material);
+            }
         }
     }
 

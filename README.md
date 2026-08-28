@@ -74,7 +74,7 @@ dependency argument syntax does not support nested settings structs.
 - Shared-buffer geometry consolidation (one buffer per model, not per primitive)
 - Per-mesh bounding volumes (100%)
 - Dynamic / streamed meshes
-- Skeletal animation & skinning
+- Skeletal animation & GPU skinning (glTF TRS clips; forward, deferred, depth, shadow and TAA velocity paths) (85%)
 - Morph targets
 - Level-of-detail (LOD) selection
 
@@ -97,10 +97,34 @@ dependency argument syntax does not support nested settings structs.
 - Cameras & `KHR_lights_punctual` (100%)
 - Embedded & external buffers / textures (100%)
 - Sparse accessors (100%)
-- Skinning & animation channels
+- Skinning & TRS animation channels (STEP / LINEAR / CUBICSPLINE) (85%)
 - Morph targets
 - Draco / meshopt / KTX2 (basisu) compression
 - Vertex colours (`COLOR_0`), 3+ UV sets
+
+Skinned models keep immutable mesh/clip data on `Model` and use one mutable
+`SkeletalAnimator` per independently animated instance:
+
+```zig
+var model = try zupra.render.gltf.loadFile(allocator, "character.glb", "assets");
+defer model.deinit();
+
+var animator = try model.createAnimator(allocator);
+defer animator.deinit();
+animator.play(0, true);
+
+var character = model.instance();
+character.setAnimator(&animator);
+
+// Each frame, before submitting the instance:
+animator.update(delta_seconds);
+scene.draw(character);
+```
+
+`SceneRenderer` automatically carries the current/previous pose through the
+depth, shadow, deferred/forward and TAA-velocity passes. Four-influence
+`JOINTS_0` / `WEIGHTS_0` assets are supported today; morph targets, secondary
+influence sets and rigid node animation remain the next asset-pipeline work.
 
 ### Lighting
 - Clustered forward / deferred (froxel grid, per-pixel light lists) (100%)
@@ -125,7 +149,7 @@ dependency argument syntax does not support nested settings structs.
 - BRDF integration LUT: generation & sampling (100%)
 - Procedural skybox (100%)
 - Cubemap loader (50%)
-- HDR / equirectangular environment loader
+- HDR / equirectangular environment loader (100%)
 - Reflection probes (blending, box projection)
 
 ### Shadows
@@ -147,21 +171,21 @@ dependency argument syntax does not support nested settings structs.
 - SSAA (supersampling) (100%)
 - MSAA (forward path) (100%)
 - SMAA
-- TAA / TAAU (needs velocity buffer + history)
+- TAA (jittered history + camera/object velocity) (100%)
 
 ### Post-processing
 - Swappable AA stage (100%)
 - User post-effect chain with HDR / LDR injection points (100%)
 - Tonemapping (100%)
 - Colour grading, chromatic aberration, vignette (examples) (100%)
-- Bloom
+- Bloom (100%)
 - Depth of field
 - Motion blur
 - Auto-exposure / eye adaptation
 
 ### Ambient occlusion
 - SSAO (kernel generation, blur)
-- GTAO (horizon search, denoise)
+- XeGTAO (horizon search, denoise) (100%)
 
 ### Screen-space reflections
 - SSR (ray marching, resolve)
@@ -189,16 +213,14 @@ dependency argument syntax does not support nested settings structs.
 
 Near-term, in order:
 
-1. **Shadow polish:** distance fade at the shadow range limit, priority-based
-   atlas allocation when lights contend for tiles, and cached static shadows.
-   The last of these needs a static / dynamic geometry tag, since every caster
-   is currently re-rendered every frame.
-2. **HDR environment loading:** the IBL bake chain is complete but it needs an
-   equirectangular `.hdr` source to replace the procedural sky, which is the
-   largest single step up in reflective-material quality.
-3. **Bloom:** an HDR-stage post effect. Emissive already writes HDR values, so
-   the input is there.
-4. **SSAO / GTAO:** the deferred G-buffer already carries depth and normals.
+1. **Animation maturity:** morph targets, eight-influence (`JOINTS_1` /
+   `WEIGHTS_1`) import, rigid animated nodes, and conservative per-joint bounds
+   so animated characters can regain aggressive camera/shadow culling.
+2. **Material breadth:** glTF clearcoat, transmission, sheen, anisotropy and
+   KTX2/BasisU texture paths, with the same linear/HDR colour contract as the
+   current PBR route.
+3. **Shadow quality/scalability:** priority-aware atlas allocation, higher-end
+   soft-shadow options and better cache diagnostics for large retained worlds.
 
 Longer term, one architectural question shapes several of the above. Submission
 is immediate-mode: `scene.draw()` records a fresh list each frame and discards it

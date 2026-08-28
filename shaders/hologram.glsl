@@ -84,7 +84,8 @@ void main() {
     // The material's albedo still contributes, so a textured model keeps its
     // identity under the effect rather than becoming a flat silhouette.
     SurfaceSample s = materialSample(v_uv);
-    vec3 albedo = pow(max(s.base_color.rgb, vec3(0.0)), vec3(2.2));
+    // materialSample returns linear values for glTF colour maps.
+    vec3 albedo = s.base_color.rgb;
 
     vec3 col = tint.rgb * (rim * 2.0 + 0.15) * scan + albedo * 0.25;
     float alpha = clamp((rim * 0.85 + 0.15) * tint.w, 0.0, 1.0);

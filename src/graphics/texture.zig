@@ -6,6 +6,41 @@ const Rect = math.Rect;
 const Vec2 = math.Vec2;
 const Color = @import("../root.zig").Color;
 
+/// How the RGB channels of an 8-bit texture are encoded on disk.
+///
+/// GPU sampling converts `.srgb` to linear light automatically, while alpha
+/// stays linear as required by the glTF and GPU sRGB specifications. Surface
+/// colour/emissive maps use `.srgb`; normals, masks and PBR parameters use
+/// `.linear` because their numbers are data rather than light intensities.
+pub const ColorSpace = enum {
+    linear,
+    srgb,
+
+    pub fn pixelFormat(self: ColorSpace) sg.PixelFormat {
+        return switch (self) {
+            .linear => .RGBA8,
+            .srgb => .SRGB8A8,
+        };
+    }
+};
+
+// zstbi exposes the linear `stbir_resize_uint8` wrapper, while its bundled C
+// implementation also exports this sRGB-aware variant. Calling it directly
+// keeps mip filtering in linear light without carrying a second image library.
+extern fn stbir_resize_uint8_srgb(
+    input_pixels: [*]const u8,
+    input_w: c_int,
+    input_h: c_int,
+    input_stride_in_bytes: c_int,
+    output_pixels: [*]u8,
+    output_w: c_int,
+    output_h: c_int,
+    output_stride_in_bytes: c_int,
+    num_channels: c_int,
+    alpha_channel: c_int,
+    flags: c_int,
+) c_int;
+
 pub const Texture = struct {
     img: sg.Image,
     view: sg.View, // texture (sampling) view
@@ -26,21 +61,30 @@ pub const Texture = struct {
         };
     }
 
-    /// Load an encoded image (PNG/JPG/...) from memory. Immutable on the GPU.
+    /// Load an encoded image (PNG/JPG/...) from memory as linear data.
+    /// Use `initBufferWithColorSpace(..., .srgb)` for an authored colour image.
     pub fn initBuffer(buffer: []const u8) !Texture {
+        return initBufferWithColorSpace(buffer, .linear);
+    }
+
+    /// Load an encoded 8-bit image from memory with explicit RGB encoding.
+    pub fn initBufferWithColorSpace(buffer: []const u8, color_space: ColorSpace) !Texture {
+        try ensureColorSpaceSupported(color_space);
         var image = try zstbi.Image.loadFromMemory(buffer, 4);
         defer image.deinit(); // safe: sokol copies immutable data during makeImage
+
+        if (image.bytes_per_component != 1) return error.UnsupportedColorSpaceFormat;
 
         var desc = sg.ImageDesc{
             .width = @intCast(image.width),
             .height = @intCast(image.height),
-            .pixel_format = .RGBA8,
+            .pixel_format = color_space.pixelFormat(),
             .usage = .{ .immutable = true },
         };
         desc.data.mip_levels[0] = .{ .ptr = image.data.ptr, .size = image.data.len };
 
         const img = sg.makeImage(desc);
-        return Texture.init(img, @intCast(desc.width), @intCast(desc.height), .RGBA8);
+        return Texture.init(img, @intCast(desc.width), @intCast(desc.height), color_space.pixelFormat());
     }
 
     /// Load an encoded 8-bit image and upload every supported mip level.
@@ -51,6 +95,16 @@ pub const Texture = struct {
     /// The temporary levels are CPU-generated with stb_image_resize and freed
     /// after `makeImage`, which copies them into GPU-owned storage.
     pub fn initBufferMipmapped(buffer: []const u8) !Texture {
+        return initBufferMipmappedWithColorSpace(buffer, .linear);
+    }
+
+    /// Load an encoded 8-bit image and generate every supported mip level.
+    ///
+    /// For `.srgb`, downsampling happens in linear light and the result is
+    /// re-encoded to sRGB before upload. Averaging encoded RGB values directly
+    /// produces visibly dark, muddy distant albedo/emissive mips.
+    pub fn initBufferMipmappedWithColorSpace(buffer: []const u8, color_space: ColorSpace) !Texture {
+        try ensureColorSpaceSupported(color_space);
         // Sokol's ImageData currently exposes 16 mip slots. Keep the temporary
         // storage in lockstep with that limit, rather than allocating per level.
         var mip_images: [16]zstbi.Image = undefined;
@@ -74,7 +128,10 @@ pub const Texture = struct {
             // immutable mip chain, including non-power-of-two source images.
             const next_width = @max(1, previous.width / 2);
             const next_height = @max(1, previous.height / 2);
-            mip_images[mip_count] = previous.resize(next_width, next_height);
+            mip_images[mip_count] = switch (color_space) {
+                .linear => previous.resize(next_width, next_height),
+                .srgb => try resizeSrgb(previous, next_width, next_height),
+            };
             mip_count += 1;
         }
 
@@ -82,7 +139,7 @@ pub const Texture = struct {
             .width = @intCast(mip_images[0].width),
             .height = @intCast(mip_images[0].height),
             .num_mipmaps = @intCast(mip_count),
-            .pixel_format = .RGBA8,
+            .pixel_format = color_space.pixelFormat(),
             .usage = .{ .immutable = true },
         };
         for (mip_images[0..mip_count], 0..) |mip, level| {
@@ -90,7 +147,7 @@ pub const Texture = struct {
         }
 
         const img = sg.makeImage(desc);
-        return Texture.init(img, @intCast(desc.width), @intCast(desc.height), .RGBA8);
+        return Texture.init(img, @intCast(desc.width), @intCast(desc.height), color_space.pixelFormat());
     }
 
     /// Build an immutable texture from raw RGBA8 pixels.
@@ -213,6 +270,45 @@ pub const Texture = struct {
         sg.destroyImage(self.img);
     }
 };
+
+fn ensureColorSpaceSupported(color_space: ColorSpace) !void {
+    if (color_space != .srgb) return;
+    const info = sg.queryPixelformat(.SRGB8A8);
+    // Material samplers may request linear filtering and mip interpolation, so
+    // merely being sampleable is not enough for a useful sRGB material image.
+    if (!info.sample or !info.filter) return error.UnsupportedSrgbTexture;
+}
+
+fn resizeSrgb(source: *const zstbi.Image, width: u32, height: u32) !zstbi.Image {
+    // Images in this path are decoded with `forced_num_components = 4`. The
+    // alpha channel remains linear (index 3), and flags=0 asks stb to handle
+    // straight-alpha source data correctly when filtering coloured cut-outs.
+    std.debug.assert(source.num_components == 4);
+    std.debug.assert(source.bytes_per_component == 1);
+
+    var result = try zstbi.Image.createEmpty(width, height, 4, .{});
+    errdefer result.deinit();
+    const ok = stbir_resize_uint8_srgb(
+        source.data.ptr,
+        @intCast(source.width),
+        @intCast(source.height),
+        0,
+        result.data.ptr,
+        @intCast(width),
+        @intCast(height),
+        0,
+        4,
+        3,
+        0,
+    );
+    if (ok == 0) return error.SrgbMipGenerationFailed;
+    return result;
+}
+
+test "texture color spaces choose their GPU formats" {
+    try std.testing.expectEqual(sg.PixelFormat.RGBA8, ColorSpace.linear.pixelFormat());
+    try std.testing.expectEqual(sg.PixelFormat.SRGB8A8, ColorSpace.srgb.pixelFormat());
+}
 
 pub const TextureRegion = struct {
     texture: Texture,

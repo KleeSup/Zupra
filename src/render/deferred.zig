@@ -29,6 +29,7 @@ const Camera3D = @import("camera3d.zig").Camera3D;
 const zupra = @import("../root.zig");
 
 const shd_geo = @import("shaders").gbuffer;
+const shd_geo_skinned = @import("shaders").gbuffer_skinned;
 const shd_light = @import("shaders").deferred_lighting;
 
 const Mesh = mesh_mod.Mesh;
@@ -46,6 +47,7 @@ const Color = zupra.Color;
 const Light = @import("light.zig").Light;
 const LightingFrame = @import("lighting.zig").LightingFrame;
 const Environment = @import("environment.zig").Environment;
+const skeletal = @import("skeletal.zig");
 
 // =====================================================================
 // Geometry pass
@@ -56,6 +58,7 @@ const GeoFs = shd_geo.FsParams;
 const ReconParams = shd_light.ReconParams;
 
 var geo_shader: ?ShaderProgram = null;
+var geo_skinned_shader: ?ShaderProgram = null;
 
 pub fn geoSharedShader() ShaderProgram {
     if (geo_shader == null) {
@@ -67,9 +70,20 @@ pub fn geoSharedShader() ShaderProgram {
     return geo_shader.?;
 }
 
+pub fn geoSharedSkinnedShader() ShaderProgram {
+    if (geo_skinned_shader == null) {
+        geo_skinned_shader = ShaderProgram.init(shd_geo_skinned.gbufferSkinnedShaderDesc, .{
+            .layout = .mesh_skinned,
+            .slots = .{ .vs_params = shd_geo_skinned.UB_vs_params, .fs_params = shd_geo_skinned.UB_fs_params },
+        });
+    }
+    return geo_skinned_shader.?;
+}
+
 pub const GeometryRenderer = struct {
     cache: *PipelineCache,
     shader: ShaderProgram,
+    skinned_shader: ShaderProgram,
     pass: PassSignature = .{},
     material_sampler: sg.Sampler,
     view_proj: Matrix = undefined,
@@ -79,6 +93,7 @@ pub const GeometryRenderer = struct {
         return .{
             .cache = cache,
             .shader = geoSharedShader(),
+            .skinned_shader = geoSharedSkinnedShader(),
             .material_sampler = sg.makeSampler(.{
                 .min_filter = .LINEAR,
                 .mag_filter = .LINEAR,
@@ -102,11 +117,21 @@ pub const GeometryRenderer = struct {
     }
 
     pub fn drawMesh(self: *GeometryRenderer, mesh: Mesh, model: Matrix, material: Material) void {
+        self.drawInternal(mesh, model, material, null);
+    }
+
+    pub fn drawSkinned(self: *GeometryRenderer, mesh: Mesh, model: Matrix, material: Material, skin: skeletal.Binding) void {
+        self.drawInternal(mesh, model, material, skin);
+    }
+
+    fn drawInternal(self: *GeometryRenderer, mesh: Mesh, model: Matrix, material: Material, skin: ?skeletal.Binding) void {
         std.debug.assert(self.active);
+        if (mesh.isSkinned() and skin == null) return;
+        if (!mesh.isSkinned() and skin != null) return;
 
         const key = PipelineKey{
-            .shader = self.shader.handle,
-            .layout = .mesh,
+            .shader = if (skin != null) self.skinned_shader.handle else self.shader.handle,
+            .layout = if (skin != null) .mesh_skinned else .mesh,
             .index_type = mesh.index_type,
             .pass = self.pass,
             .primitive = .TRIANGLES,
@@ -124,6 +149,10 @@ pub const GeometryRenderer = struct {
         var bindings = sg.Bindings{};
         bindings.vertex_buffers[0] = mesh.vbuf;
         bindings.index_buffer = mesh.ibuf;
+        if (skin) |binding| {
+            bindings.views[skeletal.palette_view_slot] = binding.palette;
+            bindings.samplers[skeletal.palette_sampler_slot] = binding.sampler;
+        }
 
         var vs = GeoVs{
             .model = @bitCast(model),
@@ -148,8 +177,9 @@ pub const GeometryRenderer = struct {
 
         sg.applyPipeline(pip);
         sg.applyBindings(bindings);
-        sg.applyUniforms(self.shader.slots.vs_params, sg.asRange(&vs));
-        sg.applyUniforms(self.shader.slots.fs_params.?, sg.asRange(&fs));
+        const shader = if (skin != null) self.skinned_shader else self.shader;
+        sg.applyUniforms(shader.slots.vs_params, sg.asRange(&vs));
+        sg.applyUniforms(shader.slots.fs_params.?, sg.asRange(&fs));
 
         var uvp = mesh_mod.uvParams(material);
         sg.applyUniforms(shd_geo.UB_uv_params, sg.asRange(&uvp));
@@ -158,10 +188,14 @@ pub const GeometryRenderer = struct {
     }
 
     pub fn drawModel(self: *GeometryRenderer, inst: ModelInstance) void {
-        const model_matrix = inst.modelMatrix();
         const model = inst.model;
         for (model.meshes, 0..) |submesh, i| {
-            self.drawMesh(submesh, model_matrix, model.materials[model.mesh_material[i]]);
+            const matrix = inst.meshModelMatrix(submesh, false);
+            if (inst.skinning(submesh)) |skin| {
+                self.drawSkinned(submesh, matrix, model.materials[model.mesh_material[i]], skin);
+            } else {
+                self.drawMesh(submesh, matrix, model.materials[model.mesh_material[i]]);
+            }
         }
     }
 

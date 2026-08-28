@@ -27,6 +27,9 @@ pub const MeshBuilder = @import("meshbuilder.zig").MeshBuilder;
 pub const Model = @import("model.zig").Model;
 pub const ModelInstance = @import("model.zig").ModelInstance;
 pub const ModelBatch = @import("model.zig").ModelBatch;
+pub const SkeletalAnimator = @import("skeletal.zig").Animator;
+pub const SkeletalAsset = @import("skeletal.zig").Asset;
+pub const SkeletalClip = @import("skeletal.zig").Clip;
 
 pub const GBuffer = @import("gbuffer.zig").GBuffer;
 pub const GeometryRenderer = @import("deferred.zig").GeometryRenderer;
