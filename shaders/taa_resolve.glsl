@@ -58,7 +58,8 @@ void main() {
 layout(binding=0) uniform taa_params {
     // Current inverse view-projection, including the rasterization jitter.
     mat4 inv_view_proj;
-    // Previous frame's jittered view-projection.
+    // Previous frame's unjittered view-projection. RGB history is stored on a
+    // stable output grid rather than following each frame's raster jitter.
     mat4 prev_view_proj;
     // xy = 1 / target size, z = blend weight for the current frame,
     // w = 1 when the render target reads top-left first.
@@ -69,6 +70,8 @@ layout(binding=0) uniform taa_params {
     // x/y convert raw hardware depth to view-space depth via B / (z - A).
     // z is the relative depth tolerance for static-history validation.
     vec4 depth_params;
+    // xy = current projection jitter, zw = previous projection jitter, in NDC.
+    vec4 jitter;
 };
 
 layout(binding=0) uniform texture2D tex_color;
@@ -238,10 +241,29 @@ void main() {
     vec4 prev_clip = prev_view_proj * vec4(world, 1.0);
 
     bool camera_valid = prev_clip.w > 0.0;
-    vec2 camera_uv = camera_valid
+    vec2 prev_stable_uv = camera_valid
         ? (prev_clip.xy / max(prev_clip.w, 1e-6)) * 0.5 + 0.5
         : v_uv;
-    if (flip) camera_uv.y = 1.0 - camera_uv.y;
+    if (flip) prev_stable_uv.y = 1.0 - prev_stable_uv.y;
+
+    // A texel in the current jittered raster represents a sub-pixel sample for
+    // that SAME texel in the stable resolve. Reproject only real camera motion:
+    // previousStable + currentJitter is algebraically
+    // currentTexel + (previousStable - currentStable). For a stationary camera
+    // this is exactly v_uv for every Halton value, so the resolved image cannot
+    // follow the jitter sequence.
+    vec2 current_jitter_uv = jitter.xy * 0.5;
+    vec2 previous_jitter_uv = jitter.zw * 0.5;
+    if (flip) {
+        current_jitter_uv.y = -current_jitter_uv.y;
+        previous_jitter_uv.y = -previous_jitter_uv.y;
+    }
+    vec2 camera_uv = prev_stable_uv + current_jitter_uv;
+
+    // History alpha is not accumulated: it always stores the depth read from
+    // that frame's jittered raster. Address it at the previous raster position
+    // of this exact world sample, independently from stable RGB history.
+    vec2 camera_depth_uv = prev_stable_uv + previous_jitter_uv;
 
     vec2 velocity = vec2(0.0);
     if (flags.w > 0.5) {
@@ -260,14 +282,16 @@ void main() {
     // Moving objects use their velocity vector instead; their expected previous
     // depth cannot be recovered from camera reprojection alone.
     float expected_prev_depth = prev_clip.w;
-    float recorded_prev_depth = historyDepthTap(prev_uv);
+    float recorded_prev_depth = historyDepthTap(camera_depth_uv);
     float depth_tolerance = max(0.01, abs(expected_prev_depth) * depth_params.z);
     bool depth_valid = abs(recorded_prev_depth - expected_prev_depth) <= depth_tolerance;
+    bool depth_uv_valid = camera_depth_uv.x >= 0.0 && camera_depth_uv.x <= 1.0
+        && camera_depth_uv.y >= 0.0 && camera_depth_uv.y <= 1.0;
 
     // No history where the camera reprojection was invalid and nothing recorded
     // a velocity, or where the surface was off screen last frame.
     bool usable = (has_velocity || camera_valid)
-        && (has_velocity || depth_valid)
+        && (has_velocity || (depth_uv_valid && depth_valid))
         && prev_uv.x >= 0.0 && prev_uv.x <= 1.0
         && prev_uv.y >= 0.0 && prev_uv.y <= 1.0;
     if (!usable) {

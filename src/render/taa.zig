@@ -10,23 +10,18 @@
 //! implementation runs a handful of slices and lets the temporal filter resolve
 //! the rest, which is why TAA is a prerequisite for it rather than a companion.
 //!
-//! SCOPE: camera reprojection, not per-object motion vectors. Velocity is
-//! derived from depth plus the previous view-projection, which is exact for
-//! static geometry under any camera motion. An object that moved under its own
-//! transform is not tracked, and relies on the resolve's neighbourhood clamp to
-//! suppress ghosting.
+//! Static geometry is reprojected from depth and the previous camera. Retained
+//! RenderWorld objects additionally provide current/previous model transforms
+//! (and skin palettes), so the velocity pass can follow independently moving
+//! geometry. Immediate submissions have no retained previous transform and
+//! therefore fall back to camera reprojection plus neighbourhood clipping.
 //!
-//! Adding true per-object velocity means storing each instance's PREVIOUS model
-//! matrix and writing a velocity target in the geometry pass. That is a retained
-//! -mode requirement: submission currently records a fresh list each frame and
-//! discards it, so there is nowhere for last frame's transform to live. It is the
-//! same architectural question the culling notes raise, reached from a different
-//! direction.
-//!
-//! DEPTH AND COLOUR ARE RASTERIZED WITH THE JITTERED PROJECTION. Reprojection
-//! therefore pairs the inverse current jittered matrix with the previous
-//! jittered matrix. An unjittered formulation is equivalent only if the shader
-//! explicitly removes the current and previous jitter offsets itself.
+//! DEPTH AND COLOUR ARE RASTERIZED WITH THE JITTERED PROJECTION, but resolved
+//! history lives on the stable output pixel grid. Reprojection therefore uses
+//! the inverse current jittered matrix to recover the exact sample represented
+//! by depth, then projects it with the previous UNJITTERED matrix and removes
+//! the current sample offset. Pairing two jittered matrices would instead drag
+//! the entire resolved image from one Halton position to the next.
 
 const std = @import("std");
 const sg = @import("sokol").gfx;
@@ -53,6 +48,7 @@ const TaaParams = extern struct {
     params: [4]f32, // 1/w, 1/h, blend weight, origin_top_left
     flags: [4]f32, // reset, variance gamma, history sharpening, velocity bound
     depth_params: [4]f32, // raw depth -> view depth A/B, relative history tolerance, unused
+    jitter: [4]f32, // current jitter xy, previous jitter xy (NDC)
 };
 
 pub const Settings = struct {
@@ -124,9 +120,14 @@ pub const Taa = struct {
     /// Which history holds the PREVIOUS frame's result.
     read_index: u32 = 0,
 
-    /// Last frame's jittered view-projection, matching the depth buffer and the
-    /// rasterized colour held in history.
+    /// Last frame's unjittered view-projection. Resolved RGB history is stored
+    /// on a stable output grid even though each new sample was rasterized with
+    /// jitter.
     prev_view_proj: Matrix = undefined,
+    /// Previous raster jitter in NDC. History alpha contains the unfiltered
+    /// depth sampled on that raster grid, so validation uses this to find the
+    /// exact prior depth sample independently from the stable RGB coordinate.
+    prev_jitter: [2]f32 = .{ 0, 0 },
     /// Set whenever the history is meaningless: first frame, after a resize, or
     /// after the caller reports a cut. Without it, frame one blends against an
     /// uninitialised target.
@@ -232,9 +233,9 @@ pub const Taa = struct {
 
     /// Resolve `color` against the history and return the accumulated result.
     ///
-    /// `camera` includes this frame's projection jitter. Depth was rasterized
-    /// with that same projection, so its inverse and the previous jittered
-    /// projection must be paired for reprojection.
+    /// `camera` includes this frame's projection jitter. Its inverse recovers
+    /// the exact world sample represented by the depth buffer; previous-frame
+    /// RGB is then addressed on the stable output grid.
     /// `velocity_view` carries per-object motion where it exists and zero
     /// elsewhere. Pass null to fall back to camera reprojection everywhere,
     /// which is correct for a scene with no moving geometry.
@@ -246,6 +247,7 @@ pub const Taa = struct {
         camera: Camera3D,
     ) Texture {
         const view_proj = camera.viewProjection();
+        const stable_view_proj = camera.unjitteredViewProjection();
         const write_index = 1 - self.read_index;
         const dst = self.history[write_index];
 
@@ -291,6 +293,12 @@ pub const Taa = struct {
                 std.math.clamp(self.settings.history_depth_tolerance, 0.0001, 1.0),
                 0,
             },
+            .jitter = .{
+                camera.jitter[0],
+                camera.jitter[1],
+                self.prev_jitter[0],
+                self.prev_jitter[1],
+            },
         };
 
         zupra.beginDrawingFramebufferClear(dst, .{ .r = 0, .g = 0, .b = 0, .a = 1 });
@@ -318,7 +326,8 @@ pub const Taa = struct {
         // Advance. The frame counter drives the jitter sequence, so it must tick
         // exactly once per rendered frame.
         self.read_index = write_index;
-        self.prev_view_proj = view_proj;
+        self.prev_view_proj = stable_view_proj;
+        self.prev_jitter = camera.jitter;
         self.reset = false;
         self.frame +%= 1;
 
@@ -341,4 +350,49 @@ fn halton(index: u32, base: u32) f32 {
         i /= base;
     }
     return r;
+}
+
+fn projectedUv(view_proj: Matrix, point: [3]f32, origin_top_left: bool) [2]f32 {
+    const clip = zm.mul(zm.f32x4(point[0], point[1], point[2], 1), view_proj);
+    const inv_w = 1.0 / clip[3];
+    const x = clip[0] * inv_w * 0.5 + 0.5;
+    const y = clip[1] * inv_w * 0.5 + 0.5;
+    return .{ x, if (origin_top_left) 1.0 - y else y };
+}
+
+fn jitterUv(jitter_ndc: [2]f32, origin_top_left: bool) [2]f32 {
+    return .{
+        jitter_ndc[0] * 0.5,
+        jitter_ndc[1] * (if (origin_top_left) -0.5 else 0.5),
+    };
+}
+
+test "stable TAA history coordinates cancel projection jitter" {
+    var current = Camera3D.init(16.0 / 9.0);
+    current.position = .{ .x = -1.5, .y = 2.0, .z = -6.0 };
+    current.target = .{ .x = 0.25, .y = 0.5, .z = 4.0 };
+    current.jitter = .{ 0.00047, -0.00031 };
+
+    var previous = current;
+    previous.jitter = .{ -0.00029, 0.00052 };
+
+    const point = [3]f32{ 1.25, -0.4, 7.0 };
+    for ([_]bool{ false, true }) |origin_top_left| {
+        const current_raster_uv = projectedUv(current.viewProjection(), point, origin_top_left);
+        const previous_stable_uv = projectedUv(previous.unjitteredViewProjection(), point, origin_top_left);
+        const current_jitter_uv = jitterUv(current.jitter, origin_top_left);
+        const previous_jitter_uv = jitterUv(previous.jitter, origin_top_left);
+
+        // The resolve stores RGB on a stable texel grid. With no real camera
+        // motion, previousStable + currentJitter must address this exact output
+        // texel regardless of which two Halton samples were rendered.
+        try std.testing.expectApproxEqAbs(current_raster_uv[0], previous_stable_uv[0] + current_jitter_uv[0], 1e-6);
+        try std.testing.expectApproxEqAbs(current_raster_uv[1], previous_stable_uv[1] + current_jitter_uv[1], 1e-6);
+
+        // History alpha is last frame's unfiltered raster depth, so its lookup
+        // coordinate must still land on the previous jittered projection.
+        const previous_raster_uv = projectedUv(previous.viewProjection(), point, origin_top_left);
+        try std.testing.expectApproxEqAbs(previous_raster_uv[0], previous_stable_uv[0] + previous_jitter_uv[0], 1e-6);
+        try std.testing.expectApproxEqAbs(previous_raster_uv[1], previous_stable_uv[1] + previous_jitter_uv[1], 1e-6);
+    }
 }

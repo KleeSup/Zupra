@@ -68,6 +68,9 @@ layout(binding=0) uniform sampler smp_cube;
 layout(binding=1) uniform sampler smp_material;
 @sampler_type smp_data nonfiltering
 layout(binding=2) uniform sampler smp_data;
+// Slot 4 belongs to the vertex-stage joint palette. Keep screen-space AO on a
+// separate clamped sampler so it never inherits a material sampler's wrapping.
+layout(binding=5) uniform sampler smp_ssao;
 
 layout(binding=1) uniform fs_params {
     vec4 base_color;
@@ -143,7 +146,7 @@ void main() {
     float ao_tex = texture(sampler2D(occlusion_map, smp_material), uv_ao).r;
     float ao = mix(1.0, ao_tex, material.z);
     vec2 ao_uv = gl_FragCoord.xy / max(cluster_grid.zw, vec2(1.0));
-    ao *= texture(sampler2D(ssao_map, smp_material), ao_uv).r;
+    ao *= texture(sampler2D(ssao_map, smp_ssao), ao_uv).r;
     vec3 color = pbrShade(v_world_pos, N, V, albedo, metallic, roughness, ao, v_view_depth);
     vec3 em = emissive.rgb * emissive.w * texture(sampler2D(emissive_map, smp_material), uv_em).rgb;
     frag_color = vec4(color + em, alpha);

@@ -64,10 +64,9 @@ pub const Camera3D = struct {
         return p;
     }
 
-    /// The projection without the jitter, for systems that explicitly operate
-    /// in stable camera coordinates. TAA's depth reprojection instead pairs
-    /// the current and previous jittered matrices, matching the projections
-    /// that rasterized its colour and depth inputs.
+    /// The projection without the jitter, for systems that operate in stable
+    /// camera coordinates. TAA uses this for history motion while retaining the
+    /// jittered projection separately to reconstruct the sampled depth ray.
     pub fn unjitteredViewProjection(self: Camera3D) Matrix {
         var c = self;
         c.jitter = .{ 0, 0 };

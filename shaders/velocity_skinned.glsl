@@ -45,6 +45,7 @@ layout(binding=0) uniform texture2D base_color_map;
 layout(binding=0) uniform sampler smp_material;
 
 layout(binding=1) uniform velocity_params {
+    // x = origin top-left; yz = current projection jitter in NDC.
     vec4 params;
     vec4 base_color;
     vec4 alpha_params;
@@ -78,6 +79,9 @@ void main() {
         curr_uv.y = 1.0 - curr_uv.y;
         prev_uv.y = 1.0 - prev_uv.y;
     }
+    vec2 current_jitter_uv = params.yz * 0.5;
+    if (params.x > 0.5) current_jitter_uv.y = -current_jitter_uv.y;
+    prev_uv += current_jitter_uv;
     frag_color = vec4(prev_uv - curr_uv, 0.0, 1.0);
 }
 @end

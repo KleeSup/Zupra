@@ -18,7 +18,9 @@
 //    textures: irradiance(cube 0), prefilter(cube 1), brdf_lut(2), normal(3),
 //              base_color(4), emissive(5), metallic_roughness(6), occlusion(7),
 //              light_data(8), cluster_table(9), cluster_indices(10)
-//    samplers: smp_cube(0), smp_material(1), smp_data(2)
+//    samplers: smp_cube(0), smp_material(1), smp_data(2), smp_shadow(3),
+//              smp_ssao(5). Slot 4 is reserved by the skinned vertex variant's
+//              non-filtering joint-palette sampler.
 //------------------------------------------------------------------------------
 
 @include pbr_lib.glsl.inc
@@ -85,6 +87,9 @@ layout(binding=0) uniform sampler smp_cube;
 layout(binding=1) uniform sampler smp_material;
 @sampler_type smp_data nonfiltering
 layout(binding=2) uniform sampler smp_data;
+// AO is screen-space data, not a material map: it needs its own clamped sampler
+// rather than inheriting a glTF material's repeat/mipmap settings.
+layout(binding=5) uniform sampler smp_ssao;
 
 layout(binding=1) uniform fs_params {
     vec4 base_color;
@@ -185,7 +190,7 @@ void main() {
     // row run the same way on every backend, which is why this needs no
     // equivalent of the froxel code's origin_top_left correction.
     vec2 ao_uv = gl_FragCoord.xy / max(cluster_grid.zw, vec2(1.0));
-    ao *= texture(sampler2D(ssao_map, smp_material), ao_uv).r;
+    ao *= texture(sampler2D(ssao_map, smp_ssao), ao_uv).r;
 
     vec3 color = pbrShade(v_world_pos, N, V, albedo, metallic, roughness, ao, v_view_depth);
 

@@ -162,7 +162,7 @@ pub const GeometryRenderer = struct {
         const c = material.base_color;
         var fs = GeoFs{
             .base_color = .{ c.r, c.g, c.b, c.a },
-            .mat_params = .{ material.metallic, material.roughness, material.occlusion_strength, material.normal_scale },
+            .mat_params = .{ material.metallic, material.roughness, material.occlusion_strength, if (material.normal_flip_y) -material.normal_scale else material.normal_scale },
             .emissive = .{ material.emissive.r, material.emissive.g, material.emissive.b, material.emissive_strength },
             .alpha_params = material.alphaTestParams(),
         };
@@ -334,6 +334,7 @@ pub const DeferredRenderer = struct {
 
         // SSAO.
         bindings.views[shd_light.VIEW_tex_ssao] = self.ssao_view;
+        bindings.samplers[shd_light.SMP_smp_ssao] = self.ssao_sampler;
 
         // Samplers: smp (G-buffer, NEAREST) and smp_cube (IBL, filtering).
         bindings.samplers[shd_light.SMP_smp] = self.sampler;

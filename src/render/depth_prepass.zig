@@ -161,6 +161,7 @@ pub const DepthPrepass = struct {
         var fs = shd_prepass.FsParams{
             .base_color = .{ base_color.r, base_color.g, base_color.b, base_color.a },
             .alpha_params = material.alphaTestParams(),
+            .normal_params = .{ if (material.normal_flip_y) -material.normal_scale else material.normal_scale, 0, 0, 0 },
         };
 
         var bindings = sg.Bindings{};
@@ -171,6 +172,7 @@ pub const DepthPrepass = struct {
             bindings.samplers[skeletal.palette_sampler_slot] = binding.sampler;
         }
         bindings.views[shd_prepass.VIEW_base_color_map] = material.map(.base_color).view;
+        bindings.views[shd_prepass.VIEW_normal_map] = material.map(.normal).view;
         bindings.samplers[shd_prepass.SMP_smp_material] = material.sampler orelse self.material_sampler;
 
         sg.applyPipeline(pip);

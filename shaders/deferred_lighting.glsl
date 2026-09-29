@@ -57,6 +57,9 @@ layout(binding=0) uniform sampler smp;
 layout(binding=1) uniform sampler smp_cube;
 @sampler_type smp_data nonfiltering
 layout(binding=2) uniform sampler smp_data;
+// XeGTAO may be half resolution, where its output must be linearly upsampled.
+// Keep that sampling state independent of the nearest G-buffer sampler.
+layout(binding=4) uniform sampler smp_ssao;
 
 layout(binding=0) uniform light_params {
     vec4 camera_pos;
@@ -122,7 +125,7 @@ void main() {
     // sky a point can see, and says nothing about whether an analytic light
     // reaches it -- that is what the shadow maps are for. Multiplying the whole
     // result would double-darken anything already in shadow.
-    mat.b *= texture(sampler2D(tex_ssao, smp), v_uv).r;
+    mat.b *= texture(sampler2D(tex_ssao, smp_ssao), v_uv).r;
     vec3 N = normalize(nrm.xyz);
     vec3 V = normalize(camera_pos.xyz - world_pos);
 

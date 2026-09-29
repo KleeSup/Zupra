@@ -15,11 +15,11 @@
 //  multiplies, in the same order, as mesh.glsl. Any change to how mesh.glsl
 //  derives gl_Position has to be mirrored here.
 //
-//  IT ALSO WRITES WORLD NORMALS. Screen-space AO needs depth and normals as
-//  textures, and the forward path has no G-buffer to supply them. Emitting the
-//  normal here costs one attachment and gives forward exactly the AO input that
-//  deferred has. Reconstructing normals from depth derivatives would be free,
-//  but yields the triangle's face normal, so smooth surfaces come out faceted.
+//  IT ALSO WRITES THE FINAL SHADING NORMALS. Screen-space AO needs depth and
+//  normals as textures, and the forward path has no G-buffer to supply them.
+//  This follows gbuffer.glsl's normal-map and two-sided-normal rules exactly;
+//  using geometric or back-facing normals here makes AO disagree with the final
+//  forward shading, especially inside double-sided models.
 //
 //  Output matches the G-buffer's convention -- world normal in rgb, alpha as a
 //  coverage mask -- so the AO shader is identical for both paths.
@@ -51,6 +51,8 @@ in vec4 tangent;
 in vec2 uv1;
 
 out vec3 v_normal;
+out vec3 v_tangent;
+out float v_tangent_w;
 out vec2 v_uv;
 out vec2 v_uv1;
 
@@ -64,24 +66,22 @@ void main() {
     // to stay the same, or AO and shading would disagree about which way a
     // surface faces.
     v_normal = mat3(model) * normal;
+    v_tangent = mat3(model) * tangent.xyz;
+    v_tangent_w = tangent.w;
     v_uv = uv * uv_scale.xy;
     v_uv1 = uv1 * uv_scale.xy;
-
-    // Keep the remaining unused attributes live. Applied AFTER the transform and
-    // as an addition of exact zero, so the position arithmetic above is
-    // untouched; perturbing `pos` before the multiply would break the bit
-    // equality with mesh.glsl that this pass depends on.
-    gl_Position.x += tangent.x * 0.0;
 }
 @end
 
 @fs fs
 layout(binding=0) uniform texture2D base_color_map;
+layout(binding=1) uniform texture2D normal_map;
 layout(binding=0) uniform sampler smp_material;
 
 layout(binding=1) uniform fs_params {
     vec4 base_color;
     vec4 alpha_params; // x cutoff, y = 1 for glTF alpha MASK
+    vec4 normal_params; // x = signed normal-map scale
 };
 
 layout(binding=2) uniform uv_params {
@@ -90,11 +90,14 @@ layout(binding=2) uniform uv_params {
 };
 
 in vec3 v_normal;
+in vec3 v_tangent;
+in float v_tangent_w;
 in vec2 v_uv;
 in vec2 v_uv1;
 out vec4 frag_color;
 
 @include_block uv_transform
+@include_block pbr_normal_map
 @include_block material_alpha
 
 void main() {
@@ -107,10 +110,17 @@ void main() {
         discardMasked(materialAlpha(base_color, base_sample), alpha_params);
     }
 
-    // alpha = 1 marks "geometry here". The AO pass reads it exactly as it reads
+    // Match the G-buffer's normal contract exactly: map first, then orient
+    // back-facing fragments. The truck's cabin is double-sided, so omitting the
+    // latter feeds reversed normals into XeGTAO and creates false dark interiors.
+    vec2 uv_n = mapUv(UV_NORMAL, v_uv, v_uv1);
+    vec3 N = applyNormalMap(normalize(v_normal), v_tangent, v_tangent_w, uv_n, normal_params.x);
+    N = orientTwoSidedNormal(N);
+
+    // Alpha = 1 marks "geometry here". The AO pass reads it exactly as it reads
     // the G-buffer's normal alpha, so background pixels are recognised the same
     // way in both paths.
-    frag_color = vec4(normalize(v_normal), 1.0);
+    frag_color = vec4(N, 1.0);
 }
 @end
 

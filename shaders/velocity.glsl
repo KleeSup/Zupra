@@ -17,9 +17,10 @@
 //  translation, since different parts of a rotating object move at different
 //  rates.
 //
-//  Both matrices are unjittered. The jitter is a rendering offset rather than
-//  part of where a surface actually is, and leaving it in would add the
-//  difference between two frames of the jitter sequence to every velocity.
+//  Raster position uses the current jittered matrix so this pass exactly
+//  matches the loaded depth buffer. Previous position is stable, and the
+//  fragment stage removes the current raster offset before taking the
+//  difference. The resulting velocity contains real camera/object motion only.
 //
 //  Alpha-masked geometry samples and discards with exactly the same glTF
 //  base-colour-alpha rule as its colour/depth/shadow passes. Otherwise a moving
@@ -78,7 +79,8 @@ layout(binding=0) uniform sampler smp_material;
 // Binding 1, not 0. Uniform block bindings are numbered across the whole
 // program rather than per stage, so the vertex stage's vs_params already owns 0.
 layout(binding=1) uniform velocity_params {
-    // x is 1 when the render target reads top-left first, yzw unused.
+    // x = 1 when the render target reads top-left first; yz = current
+    // projection jitter in NDC. w unused.
     vec4 params;
     vec4 base_color;
     vec4 alpha_params; // x cutoff, y = 1 for glTF alpha MASK
@@ -116,6 +118,14 @@ void main() {
         curr_uv.y = 1.0 - curr_uv.y;
         prev_uv.y = 1.0 - prev_uv.y;
     }
+
+    // gl_Position must remain jittered so this pass matches the loaded depth
+    // buffer. prev_view_proj is stable, so put its coordinate onto the current
+    // raster grid before subtracting; the two jitter terms then cancel and the
+    // stored velocity contains object/camera motion only.
+    vec2 current_jitter_uv = params.yz * 0.5;
+    if (params.x > 0.5) current_jitter_uv.y = -current_jitter_uv.y;
+    prev_uv += current_jitter_uv;
 
     // Stored as the offset from this pixel to where the surface was, so the
     // resolve can add it directly to its own UV. Storing the forward direction

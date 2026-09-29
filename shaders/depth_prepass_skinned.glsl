@@ -21,6 +21,8 @@ in uvec4 joints;
 in vec4 weights;
 
 out vec3 v_normal;
+out vec3 v_tangent;
+out float v_tangent_w;
 out vec2 v_uv;
 out vec2 v_uv1;
 
@@ -32,19 +34,22 @@ void main() {
     mat3 normal_matrix = transpose(inverse(mat3(model * skin)));
     gl_Position = view_proj * world;
     v_normal = normal_matrix * normal;
+    v_tangent = mat3(model) * (mat3(skin) * tangent.xyz);
+    v_tangent_w = tangent.w;
     v_uv = uv * uv_scale.xy;
     v_uv1 = uv1 * uv_scale.xy;
-    gl_Position.x += tangent.x * 0.0;
 }
 @end
 
 @fs fs
 layout(binding=0) uniform texture2D base_color_map;
+layout(binding=1) uniform texture2D normal_map;
 layout(binding=0) uniform sampler smp_material;
 
 layout(binding=1) uniform fs_params {
     vec4 base_color;
     vec4 alpha_params;
+    vec4 normal_params;
 };
 
 layout(binding=2) uniform uv_params {
@@ -53,11 +58,14 @@ layout(binding=2) uniform uv_params {
 };
 
 in vec3 v_normal;
+in vec3 v_tangent;
+in float v_tangent_w;
 in vec2 v_uv;
 in vec2 v_uv1;
 out vec4 frag_color;
 
 @include_block uv_transform
+@include_block pbr_normal_map
 @include_block material_alpha
 
 void main() {
@@ -66,7 +74,9 @@ void main() {
         vec4 base_sample = texture(sampler2D(base_color_map, smp_material), uv_bc);
         discardMasked(materialAlpha(base_color, base_sample), alpha_params);
     }
-    frag_color = vec4(normalize(v_normal), 1.0);
+    vec2 uv_n = mapUv(UV_NORMAL, v_uv, v_uv1);
+    vec3 N = applyNormalMap(normalize(v_normal), v_tangent, v_tangent_w, uv_n, normal_params.x);
+    frag_color = vec4(orientTwoSidedNormal(N), 1.0);
 }
 @end
 

@@ -62,8 +62,13 @@ pub const VelocityPass = struct {
     material_sampler: sg.Sampler,
     target: Framebuffer = undefined,
 
+    /// Jittered projection used only for raster position/depth equality.
     view_proj: Matrix = undefined,
+    /// Current stable projection, rolled into prev_view_proj after the pass.
+    stable_view_proj: Matrix = undefined,
+    /// Previous stable projection used to calculate true camera/object motion.
     prev_view_proj: Matrix = undefined,
+    current_jitter: [2]f32 = .{ 0, 0 },
     sig: PassSignature = undefined,
     active: bool = false,
     /// Set once anything is drawn this frame. When nothing moved, the target is
@@ -131,6 +136,8 @@ pub const VelocityPass = struct {
         self.active = true;
         self.any_drawn = false;
         self.view_proj = camera.viewProjection();
+        self.stable_view_proj = camera.unjitteredViewProjection();
+        self.current_jitter = camera.jitter;
 
         zupra.beginDrawingFramebufferLoadDepth(
             self.target,
@@ -145,7 +152,7 @@ pub const VelocityPass = struct {
         self.active = false;
         zupra.endDrawing();
         // Roll the camera forward here, after every draw this frame has used it.
-        self.prev_view_proj = self.view_proj;
+        self.prev_view_proj = self.stable_view_proj;
     }
 
     /// Record one submesh's motion. Only worth calling for objects whose
@@ -202,7 +209,12 @@ pub const VelocityPass = struct {
         };
         const base_color = material.base_color;
         var fs = VelocityFsParams{
-            .params = .{ if (sg.queryFeatures().origin_top_left) 1.0 else 0.0, 0, 0, 0 },
+            .params = .{
+                if (sg.queryFeatures().origin_top_left) 1.0 else 0.0,
+                self.current_jitter[0],
+                self.current_jitter[1],
+                0,
+            },
             .base_color = .{ base_color.r, base_color.g, base_color.b, base_color.a },
             .alpha_params = material.alphaTestParams(),
         };

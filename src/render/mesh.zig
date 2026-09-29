@@ -260,6 +260,7 @@ pub const MeshRenderer = struct {
 
     shadow_atlas: sg.View = .{},
     ssao_map: sg.View = .{},
+    ssao_sampler: sg.Sampler = .{},
     shadow_sampler: sg.Sampler = .{},
     shadow_params: *const shd.ShadowParams = undefined,
 
@@ -299,8 +300,9 @@ pub const MeshRenderer = struct {
     ///
     /// Whether a given draw actually READS this is decided per draw, not here --
     /// see the note in drawMesh.
-    pub fn setSsao(self: *MeshRenderer, view: sg.View) void {
+    pub fn setSsao(self: *MeshRenderer, view: sg.View, sampler: sg.Sampler) void {
         self.ssao_map = view;
+        self.ssao_sampler = sampler;
     }
 
     pub fn setShadows(self: *MeshRenderer, atlas: sg.View, sampler: sg.Sampler, params: *const shd.ShadowParams) void {
@@ -479,10 +481,17 @@ pub const MeshRenderer = struct {
                     // the same reason: both are asking "was this drawn into the
                     // prepass?", and they must not be able to disagree.
                     const ssao_valid = self.depth_prepass and depthPrepassEligible(material);
-                    bindings.views[shd.VIEW_ssao_map] = if (ssao_valid)
+                    const ssao_view = if (ssao_valid)
                         self.ssao_map
                     else
                         zupra.intern.white_1x1.view;
+                    if (skin != null) {
+                        bindings.views[shd_skinned.VIEW_ssao_map] = ssao_view;
+                        bindings.samplers[shd_skinned.SMP_smp_ssao] = self.ssao_sampler;
+                    } else {
+                        bindings.views[shd.VIEW_ssao_map] = ssao_view;
+                        bindings.samplers[shd.SMP_smp_ssao] = self.ssao_sampler;
+                    }
                     bindings.samplers[shd.SMP_smp_material] = mat_smp;
 
                     bindings.views[shd.VIEW_shadow_atlas] = self.shadow_atlas;

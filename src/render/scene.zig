@@ -347,8 +347,18 @@ pub const SceneRenderer = struct {
     }
 
     pub fn setMsaa(self: *SceneRenderer, samples: u8) void {
-        if (samples == self.msaa_samples) return;
-        self.msaa_samples = @max(1, samples);
+        const requested = @max(1, samples);
+        // Forward XeGTAO consumes the depth + normal prepass as ordinary 2D
+        // textures. A multisampled prepass depth attachment cannot safely be
+        // attached to, or sampled alongside, this single-sample AO route. Keep
+        // the renderer correct instead of creating mismatched attachments; TAA
+        // remains the antialiasing path for forward+AO.
+        const resolved = if (self.mode == .forward and self.depth_prepass and requested > 1) blk: {
+            zupra.log.warn("SceneRenderer: forward MSAA is unavailable while the depth prepass/XeGTAO route is active; using TAA/FXAA at one sample", .{});
+            break :blk 1;
+        } else requested;
+        if (resolved == self.msaa_samples) return;
+        self.msaa_samples = resolved;
         self.width = 0; // force ensureSize to recreate the target next frame
     }
 
@@ -402,7 +412,8 @@ pub const SceneRenderer = struct {
     }
 
     pub fn setAAMethod(self: *SceneRenderer, method: AAMethod) void {
-        if (self.post.aa == .taa and method != .taa) self.taa.resetHistory();
+        if (self.post.aa == method) return;
+        if (self.post.aa == .taa or method == .taa) self.taa.resetHistory();
         self.post.aa = method;
     }
 
@@ -451,8 +462,10 @@ pub const SceneRenderer = struct {
             self.camera,
         );
 
+        var lighting_camera = self.camera;
+        lighting_camera.jitter = .{ 0, 0 };
         env.lighting.beginFrame(
-            camera,
+            lighting_camera,
             env.ambient,
             @floatFromInt(self.width),
             @floatFromInt(self.height),
@@ -802,14 +815,14 @@ pub const SceneRenderer = struct {
                             self.prepass_fb.depth_sample,
                             self.prepass_fb.sample_view,
                         );
-                        self.forward.setSsao(self.ssao.aoView());
+                        self.forward.setSsao(self.ssao.aoView(), self.ssao.aoSampler());
                     } else {
-                        self.forward.setSsao(zupra.intern.white_1x1.view);
+                        self.forward.setSsao(zupra.intern.white_1x1.view, self.ssao.aoSampler());
                     }
                 } else {
                     // No prepass, no normals, no AO. White is the identity for
                     // the multiply in the shader.
-                    self.forward.setSsao(zupra.intern.white_1x1.view);
+                    self.forward.setSsao(zupra.intern.white_1x1.view, self.ssao.aoSampler());
                     zupra.beginDrawingFramebufferClear(self.scene_color, self.clear_color);
                     self.forward.beginEx(self.camera, self.env, self.scene_color.passSignature());
                 }
@@ -851,9 +864,13 @@ pub const SceneRenderer = struct {
                     self.ssao.settings.temporal_jitter = self.isTaaActive();
                     self.ssao.render(self.camera, self.gbuffer.depthTexture().view, self.gbuffer.normalTexture().view);
                     self.lit.setSsao(self.ssao.aoView(), self.ssao.aoSampler());
-                    self.forward.setSsao(self.ssao.aoView()); // FIXME: Should SSAO even be bound for transparents??
+                    // Transparent forward draws bind white below because they
+                    // were absent from the G-buffer; retain the AO view/sampler
+                    // here so the binding contract stays complete.
+                    self.forward.setSsao(self.ssao.aoView(), self.ssao.aoSampler());
                 } else {
                     self.lit.setSsao(zupra.intern.white_1x1.view, self.ssao.aoSampler());
+                    self.forward.setSsao(zupra.intern.white_1x1.view, self.ssao.aoSampler());
                 }
 
                 // PBR opaque -> scene-color via the lighting pass.
